@@ -24,7 +24,7 @@ const crearRecepcion = async (data) => {
     ]);
     const idRecepcion = recepcionResult.rows[0].id_recepcion;
 
-    // 2. Upsert de personas e insertar en persona_recepcion
+    // 2. Upsert de personas
     const idDejo = await upsertPersona(client, dejo);
     const idRecoge = await upsertPersona(client, recoge);
 
@@ -34,7 +34,7 @@ const crearRecepcion = async (data) => {
       [idRecepcion, idDejo, idRecoge]
     );
 
-    // 3. Insertar items en tamano_recepcion
+    // 3. Insertar items
     for (const item of items) {
       const tamanoRes = await client.query(
         `SELECT id_tamano FROM tamano WHERE tamano = $1`,
@@ -85,7 +85,7 @@ const crearRecepcion = async (data) => {
 };
 
 // ============================================
-// UPSERT PERSONA (por carnet)
+// UPSERT PERSONA
 // ============================================
 async function upsertPersona(client, persona) {
   const { carnet, nombres, apellidos, celular } = persona;
@@ -98,9 +98,7 @@ async function upsertPersona(client, persona) {
   if (existente.rows.length > 0) {
     const idPersona = existente.rows[0].id_persona;
     await client.query(
-      `UPDATE persona
-       SET nombres = $1, apellidos = $2, celular = $3
-       WHERE id_persona = $4`,
+      `UPDATE persona SET nombres = $1, apellidos = $2, celular = $3 WHERE id_persona = $4`,
       [nombres, apellidos, celular, idPersona]
     );
     return idPersona;
@@ -108,22 +106,19 @@ async function upsertPersona(client, persona) {
 
   const insert = await client.query(
     `INSERT INTO persona (carnet, nombres, apellidos, celular)
-     VALUES ($1, $2, $3, $4)
-     RETURNING id_persona`,
+     VALUES ($1, $2, $3, $4) RETURNING id_persona`,
     [carnet, nombres, apellidos, celular]
   );
   return insert.rows[0].id_persona;
 }
 
 // ============================================
-// BUSCAR PERSONA POR CARNET
+// BUSCAR PERSONA
 // ============================================
 const buscarPersonaPorCarnet = async (carnet) => {
   try {
     const result = await query(
-      `SELECT id_persona, carnet, nombres, apellidos, celular
-       FROM persona
-       WHERE carnet = $1`,
+      `SELECT id_persona, carnet, nombres, apellidos, celular FROM persona WHERE carnet = $1`,
       [carnet]
     );
 
@@ -155,7 +150,6 @@ const listarTamanos = async () => {
     const result = await query(
       `SELECT id_tamano, tamano, precio FROM tamano ORDER BY id_tamano`
     );
-
     return {
       success: true,
       tamanos: result.rows.map((r) => ({
@@ -306,19 +300,44 @@ const eliminarEstante = async (idEstante) => {
 };
 
 // ============================================
+// SIGUIENTE CÓDIGO DE RECEPCIÓN
+// ============================================
+const siguienteCodigo = async () => {
+  try {
+    const result = await query(
+      `SELECT codigo_recepcion
+       FROM recepcion
+       WHERE codigo_recepcion ~ '^PX-[0-9]+$'`
+    );
+
+    let max = 1000;
+    for (const row of result.rows) {
+      const n = Number(String(row.codigo_recepcion).replace(/\D/g, ""));
+      if (Number.isFinite(n) && n > max) max = n;
+    }
+
+    return {
+      success: true,
+      codigo: `PX-${max + 1}`,
+    };
+  } catch (error) {
+    console.error("Error al obtener siguiente código:", error);
+    throw error;
+  }
+};
+
+// ============================================
 // LISTAR RECEPCIONES
 // ============================================
 const listarRecepciones = async () => {
   try {
     const recepcionesRes = await query(
       `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, zona, estado
-       FROM recepcion
-       WHERE estado != 'eliminado'
+       FROM recepcion WHERE estado != 'eliminado'
        ORDER BY fecha_recepcion DESC`
     );
 
     const recepciones = [];
-
     for (const r of recepcionesRes.rows) {
       const personasRes = await query(
         `SELECT pr.tipo, p.carnet, p.nombres, p.apellidos, p.celular
@@ -327,13 +346,11 @@ const listarRecepciones = async () => {
          WHERE pr.id_recepcion = $1`,
         [r.id_recepcion]
       );
-
       const dejo = personasRes.rows.find((p) => p.tipo === "deja") || null;
       const recoge = personasRes.rows.find((p) => p.tipo === "recoge") || null;
 
       const itemsRes = await query(
-        `SELECT tr.id_tamano_recepcion, tr.precio_tamano,
-                t.tamano, e.estante
+        `SELECT tr.id_tamano_recepcion, tr.precio_tamano, t.tamano, e.estante
          FROM tamano_recepcion tr
          INNER JOIN tamano t ON tr.id_tamano = t.id_tamano
          LEFT JOIN estante e ON tr.id_estante = e.id_estante
@@ -351,14 +368,12 @@ const listarRecepciones = async () => {
         recoge,
         items: itemsRes.rows.map((it) => ({
           id_tamano_recepcion: it.id_tamano_recepcion,
-          precio_tamano:
-            it.precio_tamano == null ? null : Number(it.precio_tamano),
+          precio_tamano: it.precio_tamano == null ? null : Number(it.precio_tamano),
           tamano: it.tamano,
           estante: it.estante,
         })),
       });
     }
-
     return { success: true, recepciones };
   } catch (error) {
     console.error("Error al listar recepciones:", error);
@@ -375,4 +390,5 @@ module.exports = {
   crearEstante,
   editarEstante,
   eliminarEstante,
+  siguienteCodigo,
 };

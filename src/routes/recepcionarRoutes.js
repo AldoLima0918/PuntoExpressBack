@@ -4,25 +4,20 @@ const router = express.Router();
 const recepcionarController = require("../controllers/recepcionarController");
 const { authenticate } = require("../middleware/loginmiddleware");
 
-// ============================================
-// RECEPCIONES
-// ============================================
+// Siguiente código (antes de "/" para evitar choques)
+router.get("/siguiente-codigo", authenticate, recepcionarController.siguienteCodigo);
+
+// Recepciones
 router.post("/", authenticate, recepcionarController.crearRecepcion);
 router.get("/", authenticate, recepcionarController.listarRecepciones);
 
-// ============================================
-// PERSONAS
-// ============================================
+// Personas
 router.get("/persona/:carnet", authenticate, recepcionarController.buscarPersona);
 
-// ============================================
-// TAMAÑOS
-// ============================================
+// Tamaños
 router.get("/tamanos", authenticate, recepcionarController.listarTamanos);
 
-// ============================================
-// ESTANTES
-// ============================================
+// Estantes
 router.get("/estantes", authenticate, recepcionarController.listarEstantes);
 router.post("/estantes", authenticate, recepcionarController.crearEstante);
 router.put("/estantes/:id", authenticate, recepcionarController.editarEstante);

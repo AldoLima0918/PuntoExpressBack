@@ -25,12 +25,12 @@ function multiplicadorPorSemanas(semanas) {
 
 /**
  * Zona efectiva:
- *  - Zona 2 si pasó más de 7 días (dias > 7) o si la zona original era Zona 2.
+ *  - Zona 2 si pasaron 7 días o más (dias >= 7) o si la zona original era Zona 2.
  *  - Zona 1 en caso contrario.
  * Nota: el texto en BD es "Zona 1" / "Zona 2".
  */
 function calcularZonaEfectiva(zonaOriginal, dias) {
-  if (dias > 7) return "Zona 2";
+  if (dias >= 7) return "Zona 2";
   return zonaOriginal === "Zona 2" ? "Zona 2" : "Zona 1";
 }
 

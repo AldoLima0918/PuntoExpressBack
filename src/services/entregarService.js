@@ -111,7 +111,6 @@ const obtenerRecepcionCompleta = async (idRecepcion) => {
     precio_tamano: Number(it.precio_tamano),
   }));
 
-  // Cálculos dinámicos
   const base = items.reduce((s, it) => s + it.precio_tamano, 0);
   const { dias, semanas } = calcularDiasYSemanas(cab.fecha_recepcion);
   const { total, multiplicador } = calcularTotal(base, cab.fecha_recepcion);
@@ -121,8 +120,8 @@ const obtenerRecepcionCompleta = async (idRecepcion) => {
     id_recepcion: cab.id_recepcion,
     codigo_recepcion: cab.codigo_recepcion,
     fecha_recepcion: cab.fecha_recepcion,
-    zona: cab.zona,                       // zona original (BD)
-    zonaEfectiva,                         // zona calculada
+    zona: cab.zona,
+    zonaEfectiva,
     dias,
     semanas,
     multiplicador,
@@ -169,6 +168,7 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
   try {
     await client.query("BEGIN");
 
+    // 1. Cargar la recepción pendiente
     const cabRes = await client.query(
       `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, estado
        FROM recepcion
@@ -184,6 +184,7 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
       throw new Error("La recepción ya no está pendiente");
     }
 
+    // 2. Cargar items y calcular el total
     const itemsRes = await client.query(
       `SELECT tr.id_tamano_recepcion, tr.precio_tamano
        FROM tamano_recepcion tr
@@ -203,7 +204,9 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
       cab.fecha_recepcion
     );
 
-    // 1. Venta
+    const esEfectivo = metodoPago !== "QR";
+
+    // 3. Crear la venta
     const ventaRes = await client.query(
       `INSERT INTO venta (id_usuario, descripcion, total, metodo_pago)
        VALUES ($1, $2, $3, $4)
@@ -212,12 +215,12 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
         idUsuario,
         `Entrega de recepción ${cab.codigo_recepcion} · ${semanas} semana(s) · x${multiplicador}`,
         total,
-        metodoPago === "QR" ? "QR" : "Efectivo",
+        esEfectivo ? "Efectivo" : "QR",
       ]
     );
     const idVenta = ventaRes.rows[0].id_venta;
 
-    // 2. Detalle
+    // 4. Insertar detalle_venta (una fila por item)
     for (const it of itemsRes.rows) {
       await client.query(
         `INSERT INTO detalle_venta (id_venta, id_tamano_recepcion)
@@ -226,60 +229,63 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
       );
     }
 
-    // 3. Marcar recepción como entregada
+    // 5. Marcar la recepción como entregada
     await client.query(
       `UPDATE recepcion SET estado = 'entregado' WHERE id_recepcion = $1`,
       [idRecepcion]
     );
 
-    // 4. Caja
-    let cajaRes = await client.query(
-      `SELECT id_caja, total FROM caja WHERE estado = 'abierta' ORDER BY id_caja DESC LIMIT 1 FOR UPDATE`
-    );
-
-    let idCaja;
-    let montoAnterior;
-
-    if (cajaRes.rows.length === 0) {
-      const nuevaCaja = await client.query(
-        `INSERT INTO caja (nombre_caja, total, estado)
-         VALUES ($1, $2, 'abierta')
-         RETURNING id_caja, total`,
-        ["Caja Principal", total]
-      );
-      idCaja = nuevaCaja.rows[0].id_caja;
-      montoAnterior = 0;
-
-      await client.query(
-        `INSERT INTO transaccion_caja
-           (id_caja, id_usuario, monto_nuevo, monto_anterior, monto, tipo_movimiento, descripcion, id_venta)
-         VALUES ($1, $2, $3, $4, $5, 'apertura', $6, $7)`,
-        [idCaja, idUsuario, total, 0, total, "Apertura de caja", idVenta]
-      );
-    } else {
-      idCaja = cajaRes.rows[0].id_caja;
-      montoAnterior = Number(cajaRes.rows[0].total);
-      const montoNuevo = Number((montoAnterior + total).toFixed(2));
-
-      await client.query(
-        `UPDATE caja SET total = $1 WHERE id_caja = $2`,
-        [montoNuevo, idCaja]
+    // 6. SOLO si el pago es Efectivo, afectamos caja y transaccion_caja
+    if (esEfectivo) {
+      let cajaRes = await client.query(
+        `SELECT id_caja, total FROM caja WHERE estado = 'abierta' ORDER BY id_caja DESC LIMIT 1 FOR UPDATE`
       );
 
-      await client.query(
-        `INSERT INTO transaccion_caja
-           (id_caja, id_usuario, monto_nuevo, monto_anterior, monto, tipo_movimiento, descripcion, id_venta)
-         VALUES ($1, $2, $3, $4, $5, 'ingreso', $6, $7)`,
-        [
-          idCaja,
-          idUsuario,
-          montoNuevo,
-          montoAnterior,
-          total,
-          `Entrega ${cab.codigo_recepcion} (${metodoPago}) · ${semanas} sem`,
-          idVenta,
-        ]
-      );
+      let idCaja;
+      let montoAnterior;
+
+      if (cajaRes.rows.length === 0) {
+        // No hay caja abierta: creamos una con la venta como apertura
+        const nuevaCaja = await client.query(
+          `INSERT INTO caja (nombre_caja, total, estado)
+           VALUES ($1, $2, 'abierta')
+           RETURNING id_caja, total`,
+          ["Caja Principal", total]
+        );
+        idCaja = nuevaCaja.rows[0].id_caja;
+        montoAnterior = 0;
+
+        await client.query(
+          `INSERT INTO transaccion_caja
+             (id_caja, id_usuario, monto_nuevo, monto_anterior, monto, tipo_movimiento, descripcion, id_venta)
+           VALUES ($1, $2, $3, $4, $5, 'apertura', $6, $7)`,
+          [idCaja, idUsuario, total, 0, total, "Apertura de caja", idVenta]
+        );
+      } else {
+        idCaja = cajaRes.rows[0].id_caja;
+        montoAnterior = Number(cajaRes.rows[0].total);
+        const montoNuevo = Number((montoAnterior + total).toFixed(2));
+
+        await client.query(
+          `UPDATE caja SET total = $1 WHERE id_caja = $2`,
+          [montoNuevo, idCaja]
+        );
+
+        await client.query(
+          `INSERT INTO transaccion_caja
+             (id_caja, id_usuario, monto_nuevo, monto_anterior, monto, tipo_movimiento, descripcion, id_venta)
+           VALUES ($1, $2, $3, $4, $5, 'ingreso', $6, $7)`,
+          [
+            idCaja,
+            idUsuario,
+            montoNuevo,
+            montoAnterior,
+            total,
+            `Entrega ${cab.codigo_recepcion} (Efectivo) · ${semanas} sem`,
+            idVenta,
+          ]
+        );
+      }
     }
 
     await client.query("COMMIT");
@@ -290,7 +296,10 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
       total,
       semanas,
       multiplicador,
-      message: "Recepción entregada exitosamente",
+      metodo_pago: esEfectivo ? "Efectivo" : "QR",
+      message: esEfectivo
+        ? "Recepción entregada exitosamente (afecta caja)"
+        : "Recepción entregada exitosamente (no afecta caja)",
     };
   } catch (error) {
     await client.query("ROLLBACK");

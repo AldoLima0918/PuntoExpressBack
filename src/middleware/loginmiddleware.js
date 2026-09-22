@@ -2,6 +2,9 @@
 const jwt = require("jsonwebtoken");
 const db = require("../../db");
 
+// ============================================
+// AUTENTICAR TOKEN JWT
+// ============================================
 const authenticate = async (req, res, next) => {
   try {
     // 1. Obtener el token del header Authorization
@@ -34,9 +37,12 @@ const authenticate = async (req, res, next) => {
     }
 
     // 4. Verificar y decodificar el token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(
+      token,
+      process.env.JWT_SECRET || "punto-express-secret-key-2024"
+    );
 
-    if (!decoded || !decoded.id) {
+    if (!decoded || !decoded.id_usuario) {
       return res.status(401).json({
         success: false,
         message: "Invalid token payload",
@@ -46,23 +52,22 @@ const authenticate = async (req, res, next) => {
     // 5. Buscar el usuario en la base de datos
     const userQuery = `
       SELECT 
-        idAgente,
-        nombre,
-        apellido,
-        email,
-        telefono,
-        ci,
-        direccion,
-        especializacion,
-        rol,
-        estado,
-        idgrupo
-      FROM Agente 
-      WHERE idAgente = $1 AND estado = 'activo'
+        u.id_usuario,
+        u.id_persona,
+        u.usuario,
+        u.rol,
+        u.estado,
+        p.carnet,
+        p.nombres,
+        p.apellidos,
+        p.celular
+      FROM usuario u
+      INNER JOIN persona p ON u.id_persona = p.id_persona
+      WHERE u.id_usuario = $1 AND u.estado = 'activo'
     `;
-    
-    const userResult = await db.query(userQuery, [decoded.id]);
-    
+
+    const userResult = await db.query(userQuery, [decoded.id_usuario]);
+
     if (userResult.rows.length === 0) {
       return res.status(401).json({
         success: false,
@@ -94,6 +99,9 @@ const authenticate = async (req, res, next) => {
   }
 };
 
+// ============================================
+// AUTORIZAR POR ROL
+// ============================================
 const authorize = (requiredRoles) => {
   return (req, res, next) => {
     if (!req.user) {

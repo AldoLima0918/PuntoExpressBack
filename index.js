@@ -28,6 +28,8 @@ const corsOptions = {
   allowedHeaders: ["Content-Type", "Authorization"],
 };
 
+
+
 app.use(cors(corsOptions));
 
 app.options("*", cors(corsOptions));
@@ -35,8 +37,9 @@ app.options("*", cors(corsOptions));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
-//const loginRoutes = require("./src/routes/loginroutes");
-//app.use("/api/login", loginRoutes);
+
+const loginRoutes = require("./src/routes/loginRoutes");
+app.use("/api/login", loginRoutes);
 
 app.use((err, req, res, next) => {
   console.error(err.stack);

@@ -39,7 +39,10 @@ app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
 
 const loginRoutes = require("./src/routes/loginRoutes");
+const recepcionarRoutes = require("./src/routes/recepcionarRoutes");
+
 app.use("/api/login", loginRoutes);
+app.use("/api/recepcion", recepcionarRoutes);
 
 app.use((err, req, res, next) => {
   console.error(err.stack);

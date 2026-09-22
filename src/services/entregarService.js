@@ -1,10 +1,10 @@
 // src/services/entregarService.js
 const { query, pool } = require("../../db");
-
-// ============================================
-// CONSTANTES DE NEGOCIO
-// ============================================
-const DIA_MS = 86_400_000;
+const {
+  calcularDiasYSemanas,
+  calcularZonaEfectiva,
+  calcularTotal,
+} = require("../utils/almacenaje");
 
 // ============================================
 // BUSCAR RECEPCIONES PENDIENTES
@@ -18,12 +18,6 @@ const buscarRecepciones = async (q) => {
 
     const like = `%${texto}%`;
 
-    // Buscamos recepciones pendientes que coincidan por:
-    //   - código de recepción
-    //   - carnet de la persona que deja
-    //   - carnet de la persona que recoge
-    //   - nombre/apellido de la persona que recoge
-    //   - celular de la persona que recoge
     const recepcionesRes = await query(
       `SELECT DISTINCT r.id_recepcion
        FROM recepcion r
@@ -63,7 +57,6 @@ const buscarRecepciones = async (q) => {
 // OBTENER UNA RECEPCIÓN COMPLETA (con personas e items)
 // ============================================
 const obtenerRecepcionCompleta = async (idRecepcion) => {
-  // 1. Cabecera
   const cabRes = await query(
     `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, zona, estado
      FROM recepcion
@@ -73,7 +66,6 @@ const obtenerRecepcionCompleta = async (idRecepcion) => {
   if (cabRes.rows.length === 0) return null;
   const cab = cabRes.rows[0];
 
-  // 2. Personas
   const personasRes = await query(
     `SELECT pr.tipo, p.carnet, p.nombres, p.apellidos, p.celular
      FROM persona_recepcion pr
@@ -101,7 +93,6 @@ const obtenerRecepcionCompleta = async (idRecepcion) => {
       }
     : null;
 
-  // 3. Items
   const itemsRes = await query(
     `SELECT tr.id_tamano_recepcion, tr.precio_tamano,
             t.tamano, e.estante
@@ -120,27 +111,29 @@ const obtenerRecepcionCompleta = async (idRecepcion) => {
     precio_tamano: Number(it.precio_tamano),
   }));
 
+  // Cálculos dinámicos
+  const base = items.reduce((s, it) => s + it.precio_tamano, 0);
+  const { dias, semanas } = calcularDiasYSemanas(cab.fecha_recepcion);
+  const { total, multiplicador } = calcularTotal(base, cab.fecha_recepcion);
+  const zonaEfectiva = calcularZonaEfectiva(cab.zona, dias);
+
   return {
     id_recepcion: cab.id_recepcion,
     codigo_recepcion: cab.codigo_recepcion,
     fecha_recepcion: cab.fecha_recepcion,
-    zona: cab.zona,
+    zona: cab.zona,                       // zona original (BD)
+    zonaEfectiva,                         // zona calculada
+    dias,
+    semanas,
+    multiplicador,
+    base,
+    total,
     estado: cab.estado,
     dejo,
     recoge,
     items,
   };
 };
-
-// ============================================
-// CALCULAR DÍAS Y SEMANAS ALMACENADO
-// ============================================
-function calcularDiasYSemanas(fechaRecepcion) {
-  const ms = Date.now() - new Date(fechaRecepcion).getTime();
-  const dias = Math.floor(ms / DIA_MS);
-  const semanas = Math.floor(dias / 7);
-  return { dias: Math.max(dias, 0), semanas: Math.max(semanas, 0) };
-}
 
 // ============================================
 // PREVIEW DEL MONTO A COBRAR
@@ -151,18 +144,16 @@ const previewEntrega = async (idRecepcion) => {
     if (!detalle) {
       return { success: false, message: "Recepción no encontrada o ya entregada" };
     }
-
-    const base = detalle.items.reduce((s, it) => s + it.precio_tamano, 0);
-    const { dias, semanas } = calcularDiasYSemanas(detalle.fecha_recepcion);
-    const total = base * (semanas + 1);
-
     return {
       success: true,
       id_recepcion: detalle.id_recepcion,
       codigo_recepcion: detalle.codigo_recepcion,
-      total: Number(total.toFixed(2)),
-      semanas,
-      dias,
+      total: detalle.total,
+      base: detalle.base,
+      semanas: detalle.semanas,
+      dias: detalle.dias,
+      multiplicador: detalle.multiplicador,
+      zonaEfectiva: detalle.zonaEfectiva,
     };
   } catch (error) {
     console.error("Error en previewEntrega:", error);
@@ -178,7 +169,6 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
   try {
     await client.query("BEGIN");
 
-    // 1. Cargar la recepción pendiente
     const cabRes = await client.query(
       `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, estado
        FROM recepcion
@@ -194,7 +184,6 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
       throw new Error("La recepción ya no está pendiente");
     }
 
-    // 2. Cargar items y calcular el total
     const itemsRes = await client.query(
       `SELECT tr.id_tamano_recepcion, tr.precio_tamano
        FROM tamano_recepcion tr
@@ -209,24 +198,26 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
       (s, it) => s + Number(it.precio_tamano),
       0
     );
-    const { semanas } = calcularDiasYSemanas(cab.fecha_recepcion);
-    const total = Number((base * (semanas + 1)).toFixed(2));
+    const { total, semanas, multiplicador } = calcularTotal(
+      base,
+      cab.fecha_recepcion
+    );
 
-    // 3. Crear la venta
+    // 1. Venta
     const ventaRes = await client.query(
       `INSERT INTO venta (id_usuario, descripcion, total, metodo_pago)
        VALUES ($1, $2, $3, $4)
        RETURNING id_venta`,
       [
         idUsuario,
-        `Entrega de recepción ${cab.codigo_recepcion}`,
+        `Entrega de recepción ${cab.codigo_recepcion} · ${semanas} semana(s) · x${multiplicador}`,
         total,
         metodoPago === "QR" ? "QR" : "Efectivo",
       ]
     );
     const idVenta = ventaRes.rows[0].id_venta;
 
-    // 4. Insertar detalle_venta (una fila por item)
+    // 2. Detalle
     for (const it of itemsRes.rows) {
       await client.query(
         `INSERT INTO detalle_venta (id_venta, id_tamano_recepcion)
@@ -235,13 +226,13 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
       );
     }
 
-    // 5. Marcar la recepción como entregada
+    // 3. Marcar recepción como entregada
     await client.query(
       `UPDATE recepcion SET estado = 'entregado' WHERE id_recepcion = $1`,
       [idRecepcion]
     );
 
-    // 6. Caja: buscar una caja abierta; si no hay, crear una
+    // 4. Caja
     let cajaRes = await client.query(
       `SELECT id_caja, total FROM caja WHERE estado = 'abierta' ORDER BY id_caja DESC LIMIT 1 FOR UPDATE`
     );
@@ -250,7 +241,6 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
     let montoAnterior;
 
     if (cajaRes.rows.length === 0) {
-      // No hay caja abierta: creamos una con la venta como apertura
       const nuevaCaja = await client.query(
         `INSERT INTO caja (nombre_caja, total, estado)
          VALUES ($1, $2, 'abierta')
@@ -260,7 +250,6 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
       idCaja = nuevaCaja.rows[0].id_caja;
       montoAnterior = 0;
 
-      // Registro de apertura
       await client.query(
         `INSERT INTO transaccion_caja
            (id_caja, id_usuario, monto_nuevo, monto_anterior, monto, tipo_movimiento, descripcion, id_venta)
@@ -270,14 +259,13 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
     } else {
       idCaja = cajaRes.rows[0].id_caja;
       montoAnterior = Number(cajaRes.rows[0].total);
-      const montoNuevo = montoAnterior + total;
+      const montoNuevo = Number((montoAnterior + total).toFixed(2));
 
       await client.query(
         `UPDATE caja SET total = $1 WHERE id_caja = $2`,
         [montoNuevo, idCaja]
       );
 
-      // Registro de ingreso
       await client.query(
         `INSERT INTO transaccion_caja
            (id_caja, id_usuario, monto_nuevo, monto_anterior, monto, tipo_movimiento, descripcion, id_venta)
@@ -288,7 +276,7 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
           montoNuevo,
           montoAnterior,
           total,
-          `Entrega ${cab.codigo_recepcion} (${metodoPago})`,
+          `Entrega ${cab.codigo_recepcion} (${metodoPago}) · ${semanas} sem`,
           idVenta,
         ]
       );
@@ -300,6 +288,8 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
       success: true,
       id_venta: idVenta,
       total,
+      semanas,
+      multiplicador,
       message: "Recepción entregada exitosamente",
     };
   } catch (error) {

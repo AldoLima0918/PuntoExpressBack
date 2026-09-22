@@ -337,6 +337,12 @@ const listarRecepciones = async () => {
        ORDER BY fecha_recepcion DESC`
     );
 
+    const {
+      calcularDiasYSemanas,
+      calcularZonaEfectiva,
+      calcularTotal,
+    } = require("../utils/almacenaje");
+
     const recepciones = [];
     for (const r of recepcionesRes.rows) {
       const personasRes = await query(
@@ -358,20 +364,33 @@ const listarRecepciones = async () => {
         [r.id_recepcion]
       );
 
+      const items = itemsRes.rows.map((it) => ({
+        id_tamano_recepcion: it.id_tamano_recepcion,
+        precio_tamano: it.precio_tamano == null ? null : Number(it.precio_tamano),
+        tamano: it.tamano,
+        estante: it.estante,
+      }));
+
+      const base = items.reduce((s, it) => s + (it.precio_tamano ?? 0), 0);
+      const { dias, semanas } = calcularDiasYSemanas(r.fecha_recepcion);
+      const { total, multiplicador } = calcularTotal(base, r.fecha_recepcion);
+      const zonaEfectiva = calcularZonaEfectiva(r.zona, dias);
+
       recepciones.push({
         id_recepcion: r.id_recepcion,
         codigo_recepcion: r.codigo_recepcion,
         fecha_recepcion: r.fecha_recepcion,
         zona: r.zona,
+        zonaEfectiva,
+        dias,
+        semanas,
+        multiplicador,
+        base,
+        total,
         estado: r.estado,
         dejo,
         recoge,
-        items: itemsRes.rows.map((it) => ({
-          id_tamano_recepcion: it.id_tamano_recepcion,
-          precio_tamano: it.precio_tamano == null ? null : Number(it.precio_tamano),
-          tamano: it.tamano,
-          estante: it.estante,
-        })),
+        items,
       });
     }
     return { success: true, recepciones };

@@ -42,12 +42,15 @@ const loginRoutes = require("./src/routes/loginRoutes");
 const recepcionarRoutes = require("./src/routes/recepcionarRoutes");
 const entregarRoutes = require("./src/routes/entregarRoutes");
 const controlRoutes = require("./src/routes/controlRoutes");
+const ventasRoutes = require("./src/routes/ventasRoutes");
+
 
 
 app.use("/api/login", loginRoutes);
 app.use("/api/recepcion", recepcionarRoutes);
 app.use("/api/entregar", entregarRoutes);
 app.use("/api/control", controlRoutes);
+app.use("/api/ventas", ventasRoutes);
 
 
 app.use((err, req, res, next) => {

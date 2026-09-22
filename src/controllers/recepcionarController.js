@@ -25,6 +25,12 @@ const crearRecepcion = async (req, res) => {
       if (!it.tamano || !it.estante || it.precio == null) {
         return res.status(400).json({ success: false, message: `El paquete ${i + 1} está incompleto` });
       }
+      if (it.tamano === "Otro" && (!it.precio || Number(it.precio) <= 0)) {
+        return res.status(400).json({
+          success: false,
+          message: `El paquete ${i + 1} tiene tamaño "Otro": debes indicar un precio mayor a 0`,
+        });
+      }
     }
 
     const result = await recepcionarService.crearRecepcion({

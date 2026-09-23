@@ -45,6 +45,7 @@ const controlRoutes = require("./src/routes/controlRoutes");
 const ventasRoutes = require("./src/routes/ventasRoutes");
 const usuarioRoutes = require("./src/routes/usuarioRoutes");
 const configuracionRoutes = require("./src/routes/configuracionRoutes");
+const reportesRoutes = require("./src/routes/reportesRoutes");
 
 
 
@@ -55,6 +56,7 @@ app.use("/api/control", controlRoutes);
 app.use("/api/ventas", ventasRoutes);
 app.use("/api/usuario", usuarioRoutes);
 app.use("/api/configuracion", configuracionRoutes);
+app.use("/api/reportes", reportesRoutes);
 
 app.use((err, req, res, next) => {
   console.error(err.stack);

@@ -6,7 +6,7 @@ const ventasService = require("../services/ventasService");
 // ============================================
 const listar = async (req, res) => {
   try {
-    const { desde, hasta } = req.query;
+    const { desde, hasta, id_caja } = req.query;
 
     if (!desde || !hasta) {
       return res.status(400).json({
@@ -19,11 +19,15 @@ const listar = async (req, res) => {
     const rol = req.user?.rol;
     const esAdmin = rol === "administrador" || rol === "admin";
 
+    // El filtro por caja solo aplica a admin
+    const idCaja = esAdmin && id_caja ? Number(id_caja) : null;
+
     const result = await ventasService.listarVentas({
       desde,
       hasta,
       idUsuario,
       esAdmin,
+      idCaja,
     });
 
     res.json(result);
@@ -36,6 +40,23 @@ const listar = async (req, res) => {
   }
 };
 
+// ============================================
+// LISTAR CAJAS (para el filtro del admin)
+// ============================================
+const listarCajas = async (req, res) => {
+  try {
+    const result = await ventasService.listarCajas();
+    res.json(result);
+  } catch (error) {
+    console.error("Error en listarCajas controller:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error interno del servidor",
+    });
+  }
+};
+
 module.exports = {
   listar,
+  listarCajas,
 };

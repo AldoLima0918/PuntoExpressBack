@@ -2,19 +2,29 @@
 const { query } = require("../../db");
 
 // ============================================
-// LISTAR VENTAS POR RANGO DE FECHAS
+// LISTAR VENTAS POR RANGO DE FECHAS + FILTROS
 // ============================================
-const listarVentas = async ({ desde, hasta, idUsuario, esAdmin }) => {
+const listarVentas = async ({ desde, hasta, idUsuario, esAdmin, idCaja }) => {
   try {
-    // Validaciones básicas de fechas
     const fechaDesde = desde || "1900-01-01";
     const fechaHasta = hasta || "2999-12-31";
 
-    // Si es ayudante, solo ve sus ventas
-    const filtroUsuario = esAdmin ? "" : " AND v.id_usuario = $3";
-    const params = esAdmin
-      ? [fechaDesde, fechaHasta]
-      : [fechaDesde, fechaHasta, idUsuario];
+    const condiciones = [
+      `v.fecha_venta::date BETWEEN $1::date AND $2::date`,
+    ];
+    const params = [fechaDesde, fechaHasta];
+
+    // Filtro por usuario (ayudante solo ve las suyas)
+    if (!esAdmin && idUsuario) {
+      params.push(idUsuario);
+      condiciones.push(`v.id_usuario = $${params.length}`);
+    }
+
+    // Filtro por caja (solo admin y solo si se especifica)
+    if (esAdmin && idCaja) {
+      params.push(idCaja);
+      condiciones.push(`tc.id_caja = $${params.length}`);
+    }
 
     const ventasRes = await query(
       `SELECT
@@ -26,12 +36,15 @@ const listarVentas = async ({ desde, hasta, idUsuario, esAdmin }) => {
           v.id_usuario,
           u.usuario AS usuario_usuario,
           p.nombres AS usuario_nombre,
-          p.apellidos AS usuario_apellido
+          p.apellidos AS usuario_apellido,
+          tc.id_caja,
+          c.nombre_caja
        FROM venta v
        INNER JOIN usuario u ON v.id_usuario = u.id_usuario
        INNER JOIN persona p ON u.id_persona = p.id_persona
-       WHERE v.fecha_venta::date BETWEEN $1::date AND $2::date
-         ${filtroUsuario}
+       LEFT JOIN transaccion_caja tc ON tc.id_venta = v.id_venta
+       LEFT JOIN caja c ON tc.id_caja = c.id_caja
+       WHERE ${condiciones.join(" AND ")}
        ORDER BY v.fecha_venta DESC, v.id_venta DESC`,
       params
     );
@@ -39,7 +52,6 @@ const listarVentas = async ({ desde, hasta, idUsuario, esAdmin }) => {
     const ventas = [];
 
     for (const v of ventasRes.rows) {
-      // Buscar la recepción asociada a través de detalle_venta
       const detalleRes = await query(
         `SELECT DISTINCT
             r.codigo_recepcion,
@@ -62,7 +74,6 @@ const listarVentas = async ({ desde, hasta, idUsuario, esAdmin }) => {
         codigoRecepcion = detalleRes.rows[0].codigo_recepcion;
         const idRecepcion = detalleRes.rows[0].id_recepcion;
 
-        // Cliente = quien recoge
         const clienteRes = await query(
           `SELECT p.nombres, p.apellidos
            FROM persona_recepcion pr
@@ -86,13 +97,14 @@ const listarVentas = async ({ desde, hasta, idUsuario, esAdmin }) => {
         id_usuario: v.id_usuario,
         usuario_nombre: v.usuario_nombre,
         usuario_apellido: v.usuario_apellido,
+        id_caja: v.id_caja ?? null,
+        nombre_caja: v.nombre_caja ?? null,
         codigo_recepcion: codigoRecepcion,
         cliente_nombre: clienteNombre,
         cliente_apellido: clienteApellido,
       });
     }
 
-    // Totales
     const totales = ventas.reduce(
       (acc, v) => {
         acc.total += v.total;
@@ -104,7 +116,6 @@ const listarVentas = async ({ desde, hasta, idUsuario, esAdmin }) => {
       { total: 0, efectivo: 0, qr: 0, cantidad: 0 }
     );
 
-    // Redondear
     totales.total = Number(totales.total.toFixed(2));
     totales.efectivo = Number(totales.efectivo.toFixed(2));
     totales.qr = Number(totales.qr.toFixed(2));
@@ -116,6 +127,32 @@ const listarVentas = async ({ desde, hasta, idUsuario, esAdmin }) => {
   }
 };
 
+// ============================================
+// LISTAR CAJAS (para el filtro del admin)
+// ============================================
+const listarCajas = async () => {
+  try {
+    const result = await query(
+      `SELECT id_caja, nombre_caja, total, estado
+       FROM caja
+       ORDER BY id_caja`
+    );
+    return {
+      success: true,
+      cajas: result.rows.map((c) => ({
+        id_caja: c.id_caja,
+        nombre_caja: c.nombre_caja,
+        total: Number(c.total ?? 0),
+        estado: c.estado,
+      })),
+    };
+  } catch (error) {
+    console.error("Error al listar cajas:", error);
+    throw error;
+  }
+};
+
 module.exports = {
   listarVentas,
+  listarCajas,
 };

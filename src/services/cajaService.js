@@ -2,27 +2,117 @@
 const { query, pool } = require("../../db");
 
 // ============================================
+// HELPER: caja asignada al usuario
+// ============================================
+const obtenerCajaDeUsuario = async (idUsuario) => {
+  const result = await query(
+    `SELECT id_caja FROM usuario WHERE id_usuario = $1 AND estado <> 'eliminado'`,
+    [idUsuario]
+  );
+  if (result.rows.length === 0) return null;
+  return result.rows[0].id_caja ?? null;
+};
+
+// ============================================
+// HELPER: caja por id
+// ============================================
+const obtenerCajaPorId = async (idCaja) => {
+  const result = await query(
+    `SELECT id_caja, nombre_caja, total, estado FROM caja WHERE id_caja = $1`,
+    [idCaja]
+  );
+  return result.rows[0] ?? null;
+};
+
+// ============================================
+// HELPER: normaliza fecha a YYYY-MM-DD
+// ============================================
+const normalizarFecha = (valor) => {
+  if (!valor) return null;
+  const s = String(valor).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : null;
+};
+
+// ============================================
 // OBTENER ESTADO ACTUAL DE CAJA
 // ============================================
-const obtenerEstadoCaja = async () => {
+const obtenerEstadoCaja = async ({ idUsuario, rol, idCajaQuery }) => {
   try {
-    const result = await query(
-      `SELECT id_caja, nombre_caja, total, estado
-       FROM caja
-       ORDER BY id_caja ASC
-       LIMIT 1`
-    );
+    const esAdmin = rol === "administrador";
 
-    if (result.rows.length === 0) {
+    if (esAdmin) {
+      if (!idCajaQuery) {
+        const lista = await query(
+          `SELECT id_caja, nombre_caja, total, estado
+           FROM caja
+           ORDER BY id_caja ASC`
+        );
+
+        return {
+          success: true,
+          caja: null,
+          abierta: false,
+          total: 0,
+          cajas: lista.rows.map((c) => ({
+            id_caja: c.id_caja,
+            nombre_caja: c.nombre_caja,
+            total: Number(c.total),
+            estado: c.estado,
+          })),
+        };
+      }
+
+      const caja = await obtenerCajaPorId(Number(idCajaQuery));
+      if (!caja) {
+        return {
+          success: false,
+          caja: null,
+          abierta: false,
+          total: 0,
+          message: "La caja seleccionada no existe",
+        };
+      }
+
       return {
         success: true,
-        caja: null,
-        abierta: false,
-        total: 0,
+        caja: {
+          id_caja: caja.id_caja,
+          nombre_caja: caja.nombre_caja,
+          total: Number(caja.total),
+          estado: caja.estado,
+        },
+        abierta: caja.estado === "abierta",
+        total: Number(caja.total),
       };
     }
 
-    const caja = result.rows[0];
+    const idCajaUsuario = await obtenerCajaDeUsuario(idUsuario);
+
+    if (!idCajaUsuario) {
+      return {
+        success: false,
+        caja: null,
+        abierta: false,
+        total: 0,
+        sinCaja: true,
+        message: "No tienes una caja asignada. Contacta al administrador.",
+      };
+    }
+
+    const caja = await obtenerCajaPorId(idCajaUsuario);
+    if (!caja) {
+      return {
+        success: false,
+        caja: null,
+        abierta: false,
+        total: 0,
+        sinCaja: true,
+        message: "Tu caja asignada ya no existe. Contacta al administrador.",
+      };
+    }
+
     return {
       success: true,
       caja: {
@@ -48,39 +138,51 @@ const listarTransacciones = async ({
   hasta,
   soloMias,
   idUsuario,
+  rol,
+  idCajaQuery,
 }) => {
   try {
-    // ─── 1. Obtener la caja única ────────────
-    const cajaRes = await query(
-      `SELECT id_caja FROM caja ORDER BY id_caja ASC LIMIT 1`
-    );
+    const esAdmin = rol === "administrador";
 
-    if (cajaRes.rows.length === 0) {
-      return {
-        success: true,
-        transacciones: [],
-        resumen: { ingresos: 0, egresos: 0, total: 0 },
-      };
+    // ── Determinar qué caja ────────────────────
+    let idCaja;
+    if (esAdmin) {
+      if (!idCajaQuery) {
+        return {
+          success: true,
+          transacciones: [],
+          resumen: { ingresos: 0, egresos: 0, total: 0 },
+        };
+      }
+      idCaja = Number(idCajaQuery);
+    } else {
+      idCaja = await obtenerCajaDeUsuario(idUsuario);
+      if (!idCaja) {
+        return {
+          success: true,
+          transacciones: [],
+          resumen: { ingresos: 0, egresos: 0, total: 0 },
+        };
+      }
     }
 
-    const idCaja = cajaRes.rows[0].id_caja;
+    // ── Normalizar fechas ──────────────────────
+    const desdeNorm = normalizarFecha(desde);
+    const hastaNorm = normalizarFecha(hasta);
 
-    // ─── 2. Filtros dinámicos ────────────────
+    // ── Filtros dinámicos ─────────────────────
     const condiciones = ["tc.id_caja = $1"];
     const params = [idCaja];
     let idx = 2;
 
-    // 👇 FIX: usamos ::date para ignorar la hora y evitar bugs de timezone.
-    //    "desde" incluye desde las 00:00:00 del día.
-    //    "hasta" incluye hasta las 23:59:59.999 del día (usando < día+1).
-    if (desde) {
-      condiciones.push(`tc.fecha >= $${idx}::date`);
-      params.push(desde);
+    if (desdeNorm) {
+      condiciones.push(`tc.fecha::date >= $${idx}::date`);
+      params.push(desdeNorm);
       idx++;
     }
-    if (hasta) {
-      condiciones.push(`tc.fecha < ($${idx}::date + INTERVAL '1 day')`);
-      params.push(hasta);
+    if (hastaNorm) {
+      condiciones.push(`tc.fecha::date <= $${idx}::date`);
+      params.push(hastaNorm);
       idx++;
     }
     if (soloMias && idUsuario) {
@@ -91,7 +193,10 @@ const listarTransacciones = async ({
 
     const where = condiciones.join(" AND ");
 
-    // ─── 3. Traer transacciones ──────────────
+    // Log temporal para verificar (quitar después)
+    console.log("[CAJA] WHERE:", where);
+    console.log("[CAJA] PARAMS:", params);
+
     const result = await query(
       `SELECT
          tc.id_transaccion_caja,
@@ -129,7 +234,6 @@ const listarTransacciones = async ({
       id_venta: row.id_venta,
     }));
 
-    // ─── 4. Resumen del período ──────────────
     const ingresos = transacciones
       .filter((t) => t.tipo_movimiento === "ingreso")
       .reduce((s, t) => s + t.monto, 0);
@@ -161,90 +265,47 @@ const registrarMovimiento = async ({
   descripcion,
   monto,
   idUsuario,
+  rol,
+  idCajaQuery,
 }) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    // ─── 1. Obtener la caja única (FOR UPDATE) ───
+    const esAdmin = rol === "administrador";
+
+    let idCaja;
+    if (esAdmin) {
+      if (!idCajaQuery) {
+        throw new Error("Debes seleccionar una caja primero");
+      }
+      idCaja = Number(idCajaQuery);
+    } else {
+      const idCajaUsuario = await obtenerCajaDeUsuario(idUsuario);
+      if (!idCajaUsuario) {
+        throw new Error(
+          "No tienes una caja asignada. Contacta al administrador."
+        );
+      }
+      idCaja = idCajaUsuario;
+    }
+
     const cajaRes = await client.query(
       `SELECT id_caja, nombre_caja, total, estado
        FROM caja
-       ORDER BY id_caja ASC
-       LIMIT 1
-       FOR UPDATE`
+       WHERE id_caja = $1
+       FOR UPDATE`,
+      [idCaja]
     );
 
-    // ─── 2. Si no existe caja, solo se permite apertura ───
     if (cajaRes.rows.length === 0) {
-      if (tipo !== "apertura") {
-        throw new Error(
-          "No hay una caja abierta. Debes realizar la apertura primero"
-        );
-      }
-
-      // Crear la PRIMERA (y única) caja
-      const nueva = await client.query(
-        `INSERT INTO caja (nombre_caja, total, estado)
-         VALUES ($1, $2, 'abierta')
-         RETURNING id_caja, nombre_caja, total, estado`,
-        ["Caja Principal", monto]
-      );
-
-      const idCaja = nueva.rows[0].id_caja;
-
-      // Registrar la transacción de apertura
-      const txRes = await client.query(
-        `INSERT INTO transaccion_caja
-           (id_caja, id_usuario, monto_nuevo, monto_anterior, monto,
-            tipo_movimiento, descripcion)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id_transaccion_caja, fecha`,
-        [idCaja, idUsuario, monto, 0, monto, "apertura", descripcion]
-      );
-
-      const userRes = await client.query(
-        `SELECT p.nombres, p.apellidos
-         FROM usuario u
-         INNER JOIN persona p ON u.id_persona = p.id_persona
-         WHERE u.id_usuario = $1`,
-        [idUsuario]
-      );
-
-      await client.query("COMMIT");
-
-      return {
-        success: true,
-        transaccion: {
-          id_transaccion_caja: txRes.rows[0].id_transaccion_caja,
-          id_caja: idCaja,
-          fecha: txRes.rows[0].fecha,
-          id_usuario: idUsuario,
-          usuario_nombre: userRes.rows[0]?.nombres ?? "",
-          usuario_apellido: userRes.rows[0]?.apellidos ?? "",
-          monto_nuevo: monto,
-          monto_anterior: 0,
-          monto,
-          tipo_movimiento: "apertura",
-          descripcion,
-          id_venta: null,
-        },
-        caja: {
-          id_caja: idCaja,
-          nombre_caja: "Caja Principal",
-          total: monto,
-          estado: "abierta",
-        },
-        message: "Apertura registrada",
-      };
+      throw new Error("La caja no existe");
     }
 
-    // ─── 3. Ya existe la caja: trabajar sobre ella ───
-    const { id_caja: idCaja, total, estado } = cajaRes.rows[0];
+    const { total, estado } = cajaRes.rows[0];
     const montoAnterior = Number(total);
     const estadoActual = estado;
 
-    // ─── 4. Validaciones según tipo ──────────
     if (tipo === "apertura") {
       if (estadoActual === "abierta") {
         throw new Error("La caja ya está abierta");
@@ -257,7 +318,6 @@ const registrarMovimiento = async ({
       }
     }
 
-    // ─── 5. Calcular nuevo monto y nuevo estado ───
     let montoNuevo;
     let nuevoEstado;
 
@@ -280,15 +340,11 @@ const registrarMovimiento = async ({
       nuevoEstado = "abierta";
     }
 
-    // ─── 6. Actualizar la MISMA caja ─────────
     await client.query(
-      `UPDATE caja
-       SET total = $1, estado = $2
-       WHERE id_caja = $3`,
+      `UPDATE caja SET total = $1, estado = $2 WHERE id_caja = $3`,
       [montoNuevo, nuevoEstado, idCaja]
     );
 
-    // ─── 7. Insertar transacción ─────────────
     const txRes = await client.query(
       `INSERT INTO transaccion_caja
          (id_caja, id_usuario, monto_nuevo, monto_anterior, monto,
@@ -306,7 +362,6 @@ const registrarMovimiento = async ({
       ]
     );
 
-    // ─── 8. Datos del usuario ────────────────
     const userRes = await client.query(
       `SELECT p.nombres, p.apellidos
        FROM usuario u

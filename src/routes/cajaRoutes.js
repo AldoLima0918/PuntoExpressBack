@@ -7,13 +7,13 @@ const { authenticate } = require("../middleware/loginmiddleware");
 // Todas las rutas requieren autenticación
 router.use(authenticate);
 
-// Estado actual de la caja
+// Estado actual de la caja (opcional ?idCaja=)
 router.get("/estado", cajaController.estado);
 
-// Listar transacciones con filtros
+// Listar transacciones con filtros (opcional ?idCaja=)
 router.get("/transacciones", cajaController.listarTransacciones);
 
-// Registrar movimiento
+// Registrar movimiento (body opcional idCaja)
 router.post("/movimiento", cajaController.registrarMovimiento);
 
 module.exports = router;

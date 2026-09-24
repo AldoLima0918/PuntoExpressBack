@@ -43,4 +43,22 @@ router.delete(
   configuracionController.eliminarTamano
 );
 
+// ─── CAJAS ───────────────────────────────────
+router.get("/cajas", configuracionController.listarCajas);
+router.post(
+  "/cajas",
+  authorize(["administrador"]),
+  configuracionController.crearCaja
+);
+router.put(
+  "/cajas/:id",
+  authorize(["administrador"]),
+  configuracionController.editarCaja
+);
+router.delete(
+  "/cajas/:id",
+  authorize(["administrador"]),
+  configuracionController.eliminarCaja
+);
+
 module.exports = router;

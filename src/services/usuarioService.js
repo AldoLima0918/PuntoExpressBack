@@ -12,12 +12,15 @@ const SELECT_BASE = `
     u.usuario,
     u.rol,
     u.estado,
+    u.id_caja,
     p.carnet,
     p.nombres,
     p.apellidos,
-    p.celular
+    p.celular,
+    c.nombre_caja
   FROM usuario u
   INNER JOIN persona p ON u.id_persona = p.id_persona
+  LEFT JOIN caja c ON u.id_caja = c.id_caja
 `;
 
 const mapUsuario = (row) => ({
@@ -30,6 +33,8 @@ const mapUsuario = (row) => ({
   usuario: row.usuario,
   rol: row.rol,
   estado: row.estado,
+  id_caja: row.id_caja,
+  nombre_caja: row.nombre_caja,
 });
 
 // ============================================
@@ -144,20 +149,39 @@ const crearUsuario = async (data) => {
       throw new Error("El nombre de usuario ya está en uso");
     }
 
-    // 3. Hashear contraseña
+    // 3. Validar caja (si viene)
+    let idCaja = data.id_caja ?? null;
+    if (idCaja !== null && idCaja !== undefined) {
+      const cajaExiste = await client.query(
+        `SELECT id_caja FROM caja WHERE id_caja = $1`,
+        [idCaja]
+      );
+      if (cajaExiste.rows.length === 0) {
+        throw new Error("La caja seleccionada no existe");
+      }
+    }
+
+    // 4. Hashear contraseña
     const hash = await bcrypt.hash(data.contrasena, 10);
 
-    // 4. Insertar usuario
+    // 5. Insertar usuario
     const nuevoUsuario = await client.query(
-      `INSERT INTO usuario (id_persona, usuario, contrasena, rol, estado)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO usuario (id_persona, usuario, contrasena, rol, estado, id_caja)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id_usuario`,
-      [idPersona, data.usuario, hash, data.rol, data.estado || "activo"]
+      [
+        idPersona,
+        data.usuario,
+        hash,
+        data.rol,
+        data.estado || "activo",
+        idCaja,
+      ]
     );
 
     const idUsuario = nuevoUsuario.rows[0].id_usuario;
 
-    // 5. Devolver el usuario completo
+    // 6. Devolver el usuario completo
     const result = await client.query(
       `${SELECT_BASE} WHERE u.id_usuario = $1`,
       [idUsuario]
@@ -220,7 +244,19 @@ const editarUsuario = async (idUsuario, data) => {
       throw new Error("El nombre de usuario ya está en uso");
     }
 
-    // 4. Actualizar persona
+    // 4. Validar caja (si viene)
+    let idCaja = data.id_caja ?? null;
+    if (idCaja !== null && idCaja !== undefined) {
+      const cajaExiste = await client.query(
+        `SELECT id_caja FROM caja WHERE id_caja = $1`,
+        [idCaja]
+      );
+      if (cajaExiste.rows.length === 0) {
+        throw new Error("La caja seleccionada no existe");
+      }
+    }
+
+    // 5. Actualizar persona
     await client.query(
       `UPDATE persona
        SET carnet = $1, nombres = $2, apellidos = $3, celular = $4
@@ -228,25 +264,25 @@ const editarUsuario = async (idUsuario, data) => {
       [data.carnet, data.nombres, data.apellidos, data.celular, idPersona]
     );
 
-    // 5. Actualizar usuario (contraseña solo si viene)
+    // 6. Actualizar usuario (contraseña solo si viene)
     if (data.contrasena) {
       const hash = await bcrypt.hash(data.contrasena, 10);
       await client.query(
         `UPDATE usuario
-         SET usuario = $1, contrasena = $2, rol = $3, estado = $4
-         WHERE id_usuario = $5`,
-        [data.usuario, hash, data.rol, data.estado, idUsuario]
+         SET usuario = $1, contrasena = $2, rol = $3, estado = $4, id_caja = $5
+         WHERE id_usuario = $6`,
+        [data.usuario, hash, data.rol, data.estado, idCaja, idUsuario]
       );
     } else {
       await client.query(
         `UPDATE usuario
-         SET usuario = $1, rol = $2, estado = $3
-         WHERE id_usuario = $4`,
-        [data.usuario, data.rol, data.estado, idUsuario]
+         SET usuario = $1, rol = $2, estado = $3, id_caja = $4
+         WHERE id_usuario = $5`,
+        [data.usuario, data.rol, data.estado, idCaja, idUsuario]
       );
     }
 
-    // 6. Devolver actualizado
+    // 7. Devolver actualizado
     const result = await client.query(
       `${SELECT_BASE} WHERE u.id_usuario = $1`,
       [idUsuario]
@@ -302,6 +338,57 @@ const cambiarEstado = async (idUsuario, estado) => {
 };
 
 // ============================================
+// ASIGNAR CAJA (nuevo endpoint dedicado)
+// ============================================
+const asignarCaja = async (idUsuario, idCaja) => {
+  try {
+    // Validar que el usuario exista
+    const usuarioExiste = await query(
+      `SELECT id_usuario FROM usuario WHERE id_usuario = $1 AND estado <> 'eliminado'`,
+      [idUsuario]
+    );
+    if (usuarioExiste.rows.length === 0) {
+      return { success: false, message: "Usuario no encontrado" };
+    }
+
+    // Validar la caja (si no es null)
+    if (idCaja !== null && idCaja !== undefined) {
+      const cajaExiste = await query(
+        `SELECT id_caja FROM caja WHERE id_caja = $1`,
+        [idCaja]
+      );
+      if (cajaExiste.rows.length === 0) {
+        return { success: false, message: "La caja seleccionada no existe" };
+      }
+    }
+
+    // Actualizar la caja del usuario
+    await query(
+      `UPDATE usuario SET id_caja = $1 WHERE id_usuario = $2`,
+      [idCaja ?? null, idUsuario]
+    );
+
+    // Devolver el usuario actualizado
+    const result = await query(
+      `${SELECT_BASE} WHERE u.id_usuario = $1`,
+      [idUsuario]
+    );
+
+    return {
+      success: true,
+      usuario: mapUsuario(result.rows[0]),
+      message:
+        idCaja === null || idCaja === undefined
+          ? "Caja desasignada del usuario"
+          : "Caja asignada al usuario",
+    };
+  } catch (error) {
+    console.error("Error al asignar caja:", error);
+    throw error;
+  }
+};
+
+// ============================================
 // ELIMINAR (SOFT DELETE)
 // ============================================
 const eliminarUsuario = async (idUsuario) => {
@@ -331,5 +418,6 @@ module.exports = {
   crearUsuario,
   editarUsuario,
   cambiarEstado,
+  asignarCaja,
   eliminarUsuario,
 };

@@ -26,6 +26,13 @@ router.patch(
   usuarioController.cambiarEstado
 );
 
+// Asignar / desasignar caja (solo administrador)
+router.patch(
+  "/:id/caja",
+  authorize(["administrador"]),
+  usuarioController.asignarCaja
+);
+
 // Eliminar usuario (soft delete, solo administrador)
 router.delete("/:id", authorize(["administrador"]), usuarioController.eliminar);
 

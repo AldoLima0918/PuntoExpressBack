@@ -49,6 +49,7 @@ const crear = async (req, res) => {
       contrasena,
       rol,
       estado,
+      id_caja,
     } = req.body;
 
     if (!carnet || !nombres || !apellidos || !usuario || !contrasena || !rol) {
@@ -75,6 +76,7 @@ const crear = async (req, res) => {
       contrasena: String(contrasena),
       rol,
       estado: estado || "activo",
+      id_caja: id_caja ?? null,
     });
 
     res.status(201).json(result);
@@ -102,6 +104,7 @@ const editar = async (req, res) => {
       contrasena,
       rol,
       estado,
+      id_caja,
     } = req.body;
 
     if (!carnet || !nombres || !apellidos || !usuario || !rol) {
@@ -128,6 +131,7 @@ const editar = async (req, res) => {
       contrasena: contrasena ? String(contrasena) : undefined,
       rol,
       estado: estado || "activo",
+      id_caja: id_caja ?? null,
     });
 
     res.status(result.success ? 200 : 400).json(result);
@@ -175,6 +179,37 @@ const cambiarEstado = async (req, res) => {
 };
 
 // ============================================
+// ASIGNAR CAJA
+// ============================================
+const asignarCaja = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { id_caja } = req.body;
+
+    // Permitir null para desasignar
+    let cajaId = null;
+    if (id_caja !== null && id_caja !== undefined && id_caja !== "") {
+      cajaId = Number(id_caja);
+      if (!Number.isInteger(cajaId) || cajaId <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "id_caja debe ser un número entero positivo o null",
+        });
+      }
+    }
+
+    const result = await usuarioService.asignarCaja(Number(id), cajaId);
+    res.status(result.success ? 200 : 400).json(result);
+  } catch (error) {
+    console.error("Error en asignar caja:", error);
+    res.status(400).json({
+      success: false,
+      message: error.message || "Error al asignar caja",
+    });
+  }
+};
+
+// ============================================
 // ELIMINAR (SOFT DELETE)
 // ============================================
 const eliminar = async (req, res) => {
@@ -205,5 +240,6 @@ module.exports = {
   crear,
   editar,
   cambiarEstado,
+  asignarCaja,
   eliminar,
 };

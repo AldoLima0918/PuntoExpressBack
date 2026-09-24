@@ -205,6 +205,98 @@ const eliminarTamano = async (req, res) => {
   }
 };
 
+// ============================================
+// ─── CAJAS ──────────────────────────────────
+// ============================================
+
+const listarCajas = async (_req, res) => {
+  try {
+    const result = await configuracionService.listarCajas();
+    res.json(result);
+  } catch (error) {
+    console.error("Error en listarCajas:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error interno del servidor",
+    });
+  }
+};
+
+const crearCaja = async (req, res) => {
+  try {
+    const { nombre_caja } = req.body;
+
+    if (!nombre_caja || typeof nombre_caja !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "El nombre de la caja es obligatorio",
+      });
+    }
+
+    const nombre = nombre_caja.trim();
+    if (!nombre) {
+      return res.status(400).json({
+        success: false,
+        message: "El nombre de la caja no puede estar vacío",
+      });
+    }
+
+    const result = await configuracionService.crearCaja(nombre);
+    res.status(result.success ? 201 : 400).json(result);
+  } catch (error) {
+    console.error("Error en crearCaja:", error);
+    res.status(400).json({
+      success: false,
+      message: error.message || "Error al crear caja",
+    });
+  }
+};
+
+const editarCaja = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nombre_caja } = req.body;
+
+    if (!nombre_caja || typeof nombre_caja !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "El nombre de la caja es obligatorio",
+      });
+    }
+
+    const nombre = nombre_caja.trim();
+    if (!nombre) {
+      return res.status(400).json({
+        success: false,
+        message: "El nombre de la caja no puede estar vacío",
+      });
+    }
+
+    const result = await configuracionService.editarCaja(Number(id), nombre);
+    res.status(result.success ? 200 : 400).json(result);
+  } catch (error) {
+    console.error("Error en editarCaja:", error);
+    res.status(400).json({
+      success: false,
+      message: error.message || "Error al editar caja",
+    });
+  }
+};
+
+const eliminarCaja = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await configuracionService.eliminarCaja(Number(id));
+    res.status(result.success ? 200 : 400).json(result);
+  } catch (error) {
+    console.error("Error en eliminarCaja:", error);
+    res.status(400).json({
+      success: false,
+      message: error.message || "Error al eliminar caja",
+    });
+  }
+};
+
 module.exports = {
   listarEstantes,
   crearEstante,
@@ -214,4 +306,8 @@ module.exports = {
   crearTamano,
   editarTamano,
   eliminarTamano,
+  listarCajas,
+  crearCaja,
+  editarCaja,
+  eliminarCaja,
 };

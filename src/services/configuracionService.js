@@ -259,6 +259,151 @@ const eliminarTamano = async (idTamano) => {
   }
 };
 
+// ============================================
+// ─── CAJAS ──────────────────────────────────
+// ============================================
+
+const listarCajas = async () => {
+  try {
+    const result = await query(
+      `SELECT id_caja, nombre_caja, total, estado
+       FROM caja
+       ORDER BY id_caja ASC`
+    );
+
+    return {
+      success: true,
+      cajas: result.rows.map((row) => ({
+        id_caja: row.id_caja,
+        nombre_caja: row.nombre_caja,
+        total: Number(row.total),
+        estado: row.estado,
+      })),
+    };
+  } catch (error) {
+    console.error("Error al listar cajas:", error);
+    throw error;
+  }
+};
+
+const crearCaja = async (nombre) => {
+  try {
+    // Validar duplicado
+    const existe = await query(
+      `SELECT id_caja FROM caja WHERE nombre_caja ILIKE $1`,
+      [nombre]
+    );
+    if (existe.rows.length > 0) {
+      return { success: false, message: "Esa caja ya existe" };
+    }
+
+    const result = await query(
+      `INSERT INTO caja (nombre_caja, total, estado)
+       VALUES ($1, 0, 'cerrada')
+       RETURNING id_caja, nombre_caja, total, estado`,
+      [nombre]
+    );
+
+    return {
+      success: true,
+      caja: {
+        id_caja: result.rows[0].id_caja,
+        nombre_caja: result.rows[0].nombre_caja,
+        total: Number(result.rows[0].total),
+        estado: result.rows[0].estado,
+      },
+      message: `Caja ${nombre} agregada`,
+    };
+  } catch (error) {
+    console.error("Error al crear caja:", error);
+    throw error;
+  }
+};
+
+const editarCaja = async (idCaja, nombre) => {
+  try {
+    // Validar que exista
+    const actual = await query(
+      `SELECT id_caja FROM caja WHERE id_caja = $1`,
+      [idCaja]
+    );
+    if (actual.rows.length === 0) {
+      return { success: false, message: "Caja no encontrada" };
+    }
+
+    // Validar duplicado (excluyendo la actual)
+    const dup = await query(
+      `SELECT id_caja FROM caja WHERE nombre_caja ILIKE $1 AND id_caja <> $2`,
+      [nombre, idCaja]
+    );
+    if (dup.rows.length > 0) {
+      return { success: false, message: "Ya existe otra caja con ese nombre" };
+    }
+
+    const result = await query(
+      `UPDATE caja SET nombre_caja = $1 WHERE id_caja = $2
+       RETURNING id_caja, nombre_caja, total, estado`,
+      [nombre, idCaja]
+    );
+
+    return {
+      success: true,
+      caja: {
+        id_caja: result.rows[0].id_caja,
+        nombre_caja: result.rows[0].nombre_caja,
+        total: Number(result.rows[0].total),
+        estado: result.rows[0].estado,
+      },
+      message: "Caja actualizada",
+    };
+  } catch (error) {
+    console.error("Error al editar caja:", error);
+    throw error;
+  }
+};
+
+const eliminarCaja = async (idCaja) => {
+  try {
+    // Validar que exista
+    const actual = await query(
+      `SELECT id_caja, total FROM caja WHERE id_caja = $1`,
+      [idCaja]
+    );
+    if (actual.rows.length === 0) {
+      return { success: false, message: "Caja no encontrada" };
+    }
+
+    // Validar que no tenga usuarios asignados
+    const usuariosAsignados = await query(
+      `SELECT 1 FROM usuario WHERE id_caja = $1 LIMIT 1`,
+      [idCaja]
+    );
+    if (usuariosAsignados.rows.length > 0) {
+      return {
+        success: false,
+        message:
+          "No se puede eliminar: hay usuarios asignados a esta caja",
+      };
+    }
+
+    // Validar que el monto sea 0
+    if (Number(actual.rows[0].total) !== 0) {
+      return {
+        success: false,
+        message:
+          "No se puede eliminar: la caja tiene un monto distinto de 0",
+      };
+    }
+
+    await query(`DELETE FROM caja WHERE id_caja = $1`, [idCaja]);
+
+    return { success: true, message: "Caja eliminada" };
+  } catch (error) {
+    console.error("Error al eliminar caja:", error);
+    throw error;
+  }
+};
+
 module.exports = {
   listarEstantes,
   crearEstante,
@@ -268,4 +413,8 @@ module.exports = {
   crearTamano,
   editarTamano,
   eliminarTamano,
+  listarCajas,
+  crearCaja,
+  editarCaja,
+  eliminarCaja,
 };

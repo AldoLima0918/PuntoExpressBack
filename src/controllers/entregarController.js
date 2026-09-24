@@ -11,33 +11,24 @@ const buscar = async (req, res) => {
     res.json(result);
   } catch (error) {
     console.error("Error en buscar controller:", error);
-    res.status(500).json({
-      success: false,
-      message: "Error interno del servidor",
-    });
+    res.status(500).json({ success: false, message: "Error interno del servidor" });
   }
 };
 
 // ============================================
-// PREVIEW DEL MONTO A COBRAR
+// PREVIEW
 // ============================================
 const preview = async (req, res) => {
   try {
     const { id } = req.params;
     if (!id) {
-      return res.status(400).json({
-        success: false,
-        message: "ID de recepción requerido",
-      });
+      return res.status(400).json({ success: false, message: "ID requerido" });
     }
     const result = await entregarService.previewEntrega(Number(id));
     res.status(result.success ? 200 : 404).json(result);
   } catch (error) {
     console.error("Error en preview controller:", error);
-    res.status(500).json({
-      success: false,
-      message: "Error interno del servidor",
-    });
+    res.status(500).json({ success: false, message: "Error interno del servidor" });
   }
 };
 
@@ -62,6 +53,8 @@ const entregar = async (req, res) => {
     }
 
     const idUsuario = req.user?.id_usuario;
+    const idCajaUsuario = req.user?.id_caja ?? null;
+
     if (!idUsuario) {
       return res.status(401).json({
         success: false,
@@ -72,7 +65,8 @@ const entregar = async (req, res) => {
     const result = await entregarService.entregar(
       Number(id_recepcion),
       metodo_pago,
-      idUsuario
+      idUsuario,
+      idCajaUsuario
     );
 
     res.status(201).json(result);

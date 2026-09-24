@@ -11,12 +11,11 @@ const login = async (req, res) => {
     console.log("=== Login Controller ===");
     console.log("Username:", username);
 
-    // Validar campos requeridos
     if (!username || !password) {
       console.log("Campos faltantes");
       return res.status(400).json({
         success: false,
-        message: "Usuario y contraseña son requeridos"
+        message: "Usuario y contraseña son requeridos",
       });
     }
 
@@ -29,27 +28,26 @@ const login = async (req, res) => {
         success: true,
         message: "Inicio de sesión exitoso",
         token: result.token,
-        user: result.user
+        user: result.user,
       });
     } else {
-      // Mensaje específico según el error
       let statusCode = 401;
       let message = result.message;
 
       if (result.message === "Usuario inactivo") {
-        statusCode = 403; // Prohibido
+        statusCode = 403;
       }
 
       res.status(statusCode).json({
         success: false,
-        message: message
+        message: message,
       });
     }
   } catch (error) {
     console.error("Error en login controller:", error);
     res.status(500).json({
       success: false,
-      message: "Error interno del servidor"
+      message: "Error interno del servidor",
     });
   }
 };
@@ -61,13 +59,13 @@ const logout = async (req, res) => {
   try {
     res.json({
       success: true,
-      message: "Sesión cerrada exitosamente"
+      message: "Sesión cerrada exitosamente",
     });
   } catch (error) {
     console.error("Error en logout controller:", error);
     res.status(500).json({
       success: false,
-      message: "Error interno del servidor"
+      message: "Error interno del servidor",
     });
   }
 };
@@ -81,7 +79,6 @@ const verifyToken = async (req, res) => {
     console.log("req.user:", req.user);
 
     if (req.user) {
-      // Construir objeto de usuario para el frontend
       const userData = {
         id_usuario: req.user.id_usuario,
         id_persona: req.user.id_persona,
@@ -90,24 +87,25 @@ const verifyToken = async (req, res) => {
         lastname: req.user.apellidos,
         role: req.user.rol,
         phoneNumber: req.user.celular,
-        status: req.user.estado
+        status: req.user.estado,
+        id_caja: req.user.id_caja ?? null,
       };
 
       res.json({
         success: true,
-        user: userData
+        user: userData,
       });
     } else {
       res.status(401).json({
         success: false,
-        message: "Token inválido o expirado"
+        message: "Token inválido o expirado",
       });
     }
   } catch (error) {
     console.error("Error en verifyToken controller:", error);
     res.status(500).json({
       success: false,
-      message: "Error interno del servidor"
+      message: "Error interno del servidor",
     });
   }
 };
@@ -123,28 +121,32 @@ const changePassword = async (req, res) => {
     if (!currentPassword || !newPassword) {
       return res.status(400).json({
         success: false,
-        message: "Contraseña actual y nueva son requeridas"
+        message: "Contraseña actual y nueva son requeridas",
       });
     }
 
-    const result = await loginService.changePassword(userId, currentPassword, newPassword);
+    const result = await loginService.changePassword(
+      userId,
+      currentPassword,
+      newPassword
+    );
 
     if (result.success) {
       res.json({
         success: true,
-        message: "Contraseña cambiada exitosamente"
+        message: "Contraseña cambiada exitosamente",
       });
     } else {
       res.status(400).json({
         success: false,
-        message: result.message
+        message: result.message,
       });
     }
   } catch (error) {
     console.error("Error en changePassword controller:", error);
     res.status(500).json({
       success: false,
-      message: "Error interno del servidor"
+      message: "Error interno del servidor",
     });
   }
 };
@@ -166,24 +168,25 @@ const getCurrentUser = async (req, res) => {
         lastname: req.user.apellidos,
         role: req.user.rol,
         phoneNumber: req.user.celular,
-        status: req.user.estado
+        status: req.user.estado,
+        id_caja: req.user.id_caja ?? null,
       };
 
       res.json({
         success: true,
-        user: userData
+        user: userData,
       });
     } else {
       res.status(401).json({
         success: false,
-        message: "Usuario no autenticado"
+        message: "Usuario no autenticado",
       });
     }
   } catch (error) {
     console.error("Error en getCurrentUser controller:", error);
     res.status(500).json({
       success: false,
-      message: "Error interno del servidor"
+      message: "Error interno del servidor",
     });
   }
 };
@@ -193,5 +196,5 @@ module.exports = {
   logout,
   verifyToken,
   changePassword,
-  getCurrentUser
+  getCurrentUser,
 };

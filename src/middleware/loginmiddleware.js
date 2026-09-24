@@ -2,12 +2,8 @@
 const jwt = require("jsonwebtoken");
 const db = require("../../db");
 
-// ============================================
-// AUTENTICAR TOKEN JWT
-// ============================================
 const authenticate = async (req, res, next) => {
   try {
-    // 1. Obtener el token del header Authorization
     const authHeader = req.headers.authorization;
 
     if (!authHeader) {
@@ -17,7 +13,6 @@ const authenticate = async (req, res, next) => {
       });
     }
 
-    // 2. Verificar formato del header
     const tokenParts = authHeader.split(" ");
     if (tokenParts.length !== 2 || tokenParts[0] !== "Bearer") {
       return res.status(401).json({
@@ -28,7 +23,6 @@ const authenticate = async (req, res, next) => {
 
     const token = tokenParts[1];
 
-    // 3. Verificar que el token no esté vacío
     if (!token || token === "null" || token === "undefined") {
       return res.status(401).json({
         success: false,
@@ -36,7 +30,6 @@ const authenticate = async (req, res, next) => {
       });
     }
 
-    // 4. Verificar y decodificar el token
     const decoded = jwt.verify(
       token,
       process.env.JWT_SECRET || "punto-express-secret-key-2024"
@@ -49,7 +42,6 @@ const authenticate = async (req, res, next) => {
       });
     }
 
-    // 5. Buscar el usuario en la base de datos
     const userQuery = `
       SELECT 
         u.id_usuario,
@@ -57,6 +49,7 @@ const authenticate = async (req, res, next) => {
         u.usuario,
         u.rol,
         u.estado,
+        u.id_caja,
         p.carnet,
         p.nombres,
         p.apellidos,
@@ -75,11 +68,7 @@ const authenticate = async (req, res, next) => {
       });
     }
 
-    const user = userResult.rows[0];
-
-    // 6. Adjuntar información del usuario al request
-    req.user = user;
-
+    req.user = userResult.rows[0];
     next();
   } catch (error) {
     console.error("Authentication error:", error);
@@ -99,9 +88,6 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-// ============================================
-// AUTORIZAR POR ROL
-// ============================================
 const authorize = (requiredRoles) => {
   return (req, res, next) => {
     if (!req.user) {
@@ -110,14 +96,12 @@ const authorize = (requiredRoles) => {
         message: "User not authenticated",
       });
     }
-
     if (!requiredRoles.includes(req.user.rol)) {
       return res.status(403).json({
         success: false,
         message: "Insufficient permissions",
       });
     }
-
     next();
   };
 };

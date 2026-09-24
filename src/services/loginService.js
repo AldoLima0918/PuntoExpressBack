@@ -11,7 +11,6 @@ const authenticateUser = async (username, password) => {
     console.log("=== authenticateUser ===");
     console.log("Username:", username);
 
-    // 1. Buscar usuario en la base de datos
     const userQuery = `
       SELECT 
         u.id_usuario,
@@ -20,6 +19,7 @@ const authenticateUser = async (username, password) => {
         u.contrasena,
         u.rol,
         u.estado,
+        u.id_caja,
         p.carnet,
         p.nombres,
         p.apellidos,
@@ -33,50 +33,37 @@ const authenticateUser = async (username, password) => {
 
     if (result.rows.length === 0) {
       console.log("Usuario no encontrado");
-      return {
-        success: false,
-        message: "Usuario no encontrado"
-      };
+      return { success: false, message: "Usuario no encontrado" };
     }
 
     const user = result.rows[0];
     console.log("Usuario encontrado:", user.usuario, "Rol:", user.rol);
 
-    // 2. Verificar estado del usuario
     if (user.estado !== "activo") {
       console.log("Usuario inactivo");
-      return {
-        success: false,
-        message: "Usuario inactivo"
-      };
+      return { success: false, message: "Usuario inactivo" };
     }
 
-    // 3. Verificar contraseña
     const isPasswordValid = await bcrypt.compare(password, user.contrasena);
-
     if (!isPasswordValid) {
       console.log("Contraseña incorrecta");
-      return {
-        success: false,
-        message: "Credenciales incorrectas"
-      };
+      return { success: false, message: "Credenciales incorrectas" };
     }
 
     console.log("Contraseña correcta");
 
-    // 4. Generar token JWT
     const token = jwt.sign(
       {
         id_usuario: user.id_usuario,
         id_persona: user.id_persona,
         usuario: user.usuario,
-        rol: user.rol
+        rol: user.rol,
+        id_caja: user.id_caja ?? null,
       },
       process.env.JWT_SECRET || "punto-express-secret-key-2024",
       { expiresIn: "24h" }
     );
 
-    // 5. Preparar datos del usuario para retornar
     const userData = {
       id_usuario: user.id_usuario,
       id_persona: user.id_persona,
@@ -85,20 +72,21 @@ const authenticateUser = async (username, password) => {
       lastname: user.apellidos,
       role: user.rol,
       phoneNumber: user.celular,
-      status: user.estado
+      status: user.estado,
+      id_caja: user.id_caja ?? null,
     };
 
     console.log("Datos de usuario a retornar:");
     console.log("- username:", userData.username);
     console.log("- role:", userData.role);
+    console.log("- id_caja:", userData.id_caja);
 
     return {
       success: true,
       message: "Autenticación exitosa",
       token,
-      user: userData
+      user: userData,
     };
-
   } catch (error) {
     console.error("Error en authService:", error);
     throw new Error("Error al autenticar usuario");
@@ -110,60 +98,35 @@ const authenticateUser = async (username, password) => {
 // ============================================
 const changePassword = async (userId, currentPassword, newPassword) => {
   try {
-    // 1. Obtener contraseña actual del usuario
-    const userQuery = `
-      SELECT contrasena 
-      FROM usuario 
-      WHERE id_usuario = $1
-    `;
-
+    const userQuery = `SELECT contrasena FROM usuario WHERE id_usuario = $1`;
     const result = await query(userQuery, [userId]);
 
     if (result.rows.length === 0) {
-      return {
-        success: false,
-        message: "Usuario no encontrado"
-      };
+      return { success: false, message: "Usuario no encontrado" };
     }
 
     const user = result.rows[0];
-
-    // 2. Verificar contraseña actual
     const isPasswordValid = await bcrypt.compare(currentPassword, user.contrasena);
-
     if (!isPasswordValid) {
-      return {
-        success: false,
-        message: "Contraseña actual incorrecta"
-      };
+      return { success: false, message: "Contraseña actual incorrecta" };
     }
 
-    // 3. Validar nueva contraseña
     if (newPassword.length < 6) {
       return {
         success: false,
-        message: "La nueva contraseña debe tener al menos 6 caracteres"
+        message: "La nueva contraseña debe tener al menos 6 caracteres",
       };
     }
 
-    // 4. Hash de la nueva contraseña
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
 
-    // 5. Actualizar contraseña en la base de datos
-    const updateQuery = `
-      UPDATE usuario 
-      SET contrasena = $1 
-      WHERE id_usuario = $2
-    `;
+    await query(`UPDATE usuario SET contrasena = $1 WHERE id_usuario = $2`, [
+      hashedPassword,
+      userId,
+    ]);
 
-    await query(updateQuery, [hashedPassword, userId]);
-
-    return {
-      success: true,
-      message: "Contraseña cambiada exitosamente"
-    };
-
+    return { success: true, message: "Contraseña cambiada exitosamente" };
   } catch (error) {
     console.error("Error al cambiar contraseña:", error);
     throw new Error("Error al cambiar contraseña");
@@ -183,6 +146,7 @@ const getUsuarioByUsername = async (username) => {
         u.contrasena,
         u.rol,
         u.estado,
+        u.id_caja,
         p.carnet,
         p.nombres,
         p.apellidos,
@@ -191,13 +155,8 @@ const getUsuarioByUsername = async (username) => {
       INNER JOIN persona p ON u.id_persona = p.id_persona
       WHERE u.usuario = $1
     `;
-
     const result = await query(userQuery, [username]);
-
-    if (result.rows.length === 0) {
-      return null;
-    }
-
+    if (result.rows.length === 0) return null;
     return result.rows[0];
   } catch (error) {
     console.error("Error al obtener usuario:", error);
@@ -208,5 +167,5 @@ const getUsuarioByUsername = async (username) => {
 module.exports = {
   authenticateUser,
   changePassword,
-  getUsuarioByUsername
+  getUsuarioByUsername,
 };

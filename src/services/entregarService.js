@@ -12,9 +12,7 @@ const {
 const buscarRecepciones = async (q) => {
   try {
     const texto = String(q || "").trim();
-    if (!texto) {
-      return { success: true, recepciones: [] };
-    }
+    if (!texto) return { success: true, recepciones: [] };
 
     const like = `%${texto}%`;
 
@@ -54,7 +52,7 @@ const buscarRecepciones = async (q) => {
 };
 
 // ============================================
-// OBTENER UNA RECEPCIÓN COMPLETA (con personas e items)
+// OBTENER UNA RECEPCIÓN COMPLETA
 // ============================================
 const obtenerRecepcionCompleta = async (idRecepcion) => {
   const cabRes = await query(
@@ -135,7 +133,7 @@ const obtenerRecepcionCompleta = async (idRecepcion) => {
 };
 
 // ============================================
-// PREVIEW DEL MONTO A COBRAR
+// PREVIEW
 // ============================================
 const previewEntrega = async (idRecepcion) => {
   try {
@@ -163,12 +161,11 @@ const previewEntrega = async (idRecepcion) => {
 // ============================================
 // ENTREGAR (TRANSACCIÓN)
 // ============================================
-const entregar = async (idRecepcion, metodoPago, idUsuario) => {
+const entregar = async (idRecepcion, metodoPago, idUsuario, idCajaUsuario) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    // 1. Cargar la recepción pendiente
     const cabRes = await client.query(
       `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, estado
        FROM recepcion
@@ -184,7 +181,6 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
       throw new Error("La recepción ya no está pendiente");
     }
 
-    // 2. Cargar items y calcular el total
     const itemsRes = await client.query(
       `SELECT tr.id_tamano_recepcion, tr.precio_tamano
        FROM tamano_recepcion tr
@@ -206,7 +202,7 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
 
     const esEfectivo = metodoPago !== "QR";
 
-    // 3. Crear la venta
+    // 1. Venta
     const ventaRes = await client.query(
       `INSERT INTO venta (id_usuario, descripcion, total, metodo_pago)
        VALUES ($1, $2, $3, $4)
@@ -220,7 +216,7 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
     );
     const idVenta = ventaRes.rows[0].id_venta;
 
-    // 4. Insertar detalle_venta (una fila por item)
+    // 2. Detalle
     for (const it of itemsRes.rows) {
       await client.query(
         `INSERT INTO detalle_venta (id_venta, id_tamano_recepcion)
@@ -229,23 +225,36 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
       );
     }
 
-    // 5. Marcar la recepción como entregada
+    // 3. Marcar recepción como entregada
     await client.query(
       `UPDATE recepcion SET estado = 'entregado' WHERE id_recepcion = $1`,
       [idRecepcion]
     );
 
-    // 6. SOLO si el pago es Efectivo, afectamos caja y transaccion_caja
+    // 4. Caja solo si es efectivo
     if (esEfectivo) {
-      let cajaRes = await client.query(
-        `SELECT id_caja, total FROM caja WHERE estado = 'abierta' ORDER BY id_caja DESC LIMIT 1 FOR UPDATE`
-      );
+      let cajaRes;
+
+      // Prioridad 1: la caja asignada al usuario
+      if (idCajaUsuario) {
+        cajaRes = await client.query(
+          `SELECT id_caja, total FROM caja WHERE id_caja = $1 FOR UPDATE`,
+          [idCajaUsuario]
+        );
+      }
+
+      // Fallback: la última caja abierta
+      if (!cajaRes || cajaRes.rows.length === 0) {
+        cajaRes = await client.query(
+          `SELECT id_caja, total FROM caja WHERE estado = 'abierta' ORDER BY id_caja DESC LIMIT 1 FOR UPDATE`
+        );
+      }
 
       let idCaja;
       let montoAnterior;
 
       if (cajaRes.rows.length === 0) {
-        // No hay caja abierta: creamos una con la venta como apertura
+        // No hay caja disponible: crear
         const nuevaCaja = await client.query(
           `INSERT INTO caja (nombre_caja, total, estado)
            VALUES ($1, $2, 'abierta')
@@ -267,7 +276,7 @@ const entregar = async (idRecepcion, metodoPago, idUsuario) => {
         const montoNuevo = Number((montoAnterior + total).toFixed(2));
 
         await client.query(
-          `UPDATE caja SET total = $1 WHERE id_caja = $2`,
+          `UPDATE caja SET total = $1, estado = 'abierta' WHERE id_caja = $2`,
           [montoNuevo, idCaja]
         );
 

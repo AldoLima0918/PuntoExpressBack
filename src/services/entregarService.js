@@ -159,6 +159,123 @@ const previewEntrega = async (idRecepcion) => {
 };
 
 // ============================================
+// ESTADO DE LA CAJA DEL USUARIO
+// ============================================
+const estadoCajaUsuario = async (idUsuario, idCajaUsuario) => {
+  try {
+    // Caso 1: el usuario tiene caja asignada
+    if (idCajaUsuario) {
+      const res = await query(
+        `SELECT id_caja, nombre_caja, total, estado
+         FROM caja WHERE id_caja = $1`,
+        [idCajaUsuario]
+      );
+      if (res.rows.length === 0) {
+        return {
+          success: true,
+          tieneCaja: false,
+          abierta: false,
+          caja: null,
+          message: "La caja asignada no existe.",
+        };
+      }
+      const c = res.rows[0];
+      return {
+        success: true,
+        tieneCaja: true,
+        abierta: c.estado === "abierta",
+        caja: {
+          id_caja: c.id_caja,
+          nombre_caja: c.nombre_caja,
+          total: Number(c.total ?? 0),
+          estado: c.estado,
+        },
+        message:
+          c.estado === "abierta"
+            ? "Caja abierta. Puedes registrar entregas."
+            : "Caja cerrada. Debes abrir la caja para poder entregar.",
+      };
+    }
+
+    // Caso 2: el usuario no tiene caja asignada → buscamos la última abierta
+    const res = await query(
+      `SELECT id_caja, nombre_caja, total, estado
+       FROM caja
+       WHERE estado = 'abierta'
+       ORDER BY id_caja DESC LIMIT 1`
+    );
+
+    if (res.rows.length === 0) {
+      return {
+        success: true,
+        tieneCaja: false,
+        abierta: false,
+        caja: null,
+        message: "No hay cajas abiertas. Debes abrir una caja para poder entregar en efectivo.",
+      };
+    }
+
+    const c = res.rows[0];
+    return {
+      success: true,
+      tieneCaja: true,
+      abierta: true,
+      caja: {
+        id_caja: c.id_caja,
+        nombre_caja: c.nombre_caja,
+        total: Number(c.total ?? 0),
+        estado: c.estado,
+      },
+      message: "Caja abierta. Puedes registrar entregas.",
+    };
+  } catch (error) {
+    console.error("Error al consultar estado de caja:", error);
+    throw error;
+  }
+};
+
+// ============================================
+// VALIDAR CAJA ANTES DE ENTREGAR
+// ============================================
+async function validarCajaAbierta(client, idCajaUsuario, esEfectivo) {
+  // Si es QR, no se exige caja abierta
+  if (!esEfectivo) return { ok: true, idCaja: null };
+
+  // Si el usuario tiene caja asignada, debe estar abierta
+  if (idCajaUsuario) {
+    const res = await client.query(
+      `SELECT id_caja, estado FROM caja WHERE id_caja = $1 FOR UPDATE`,
+      [idCajaUsuario]
+    );
+    if (res.rows.length === 0) {
+      return { ok: false, message: "La caja asignada no existe." };
+    }
+    const c = res.rows[0];
+    if (c.estado !== "abierta") {
+      return {
+        ok: false,
+        message:
+          "La caja está cerrada. Debes abrir la caja para poder registrar entregas en efectivo.",
+      };
+    }
+    return { ok: true, idCaja: c.id_caja };
+  }
+
+  // Si no tiene caja asignada, debe existir al menos una caja abierta
+  const res = await client.query(
+    `SELECT id_caja, estado FROM caja WHERE estado = 'abierta' ORDER BY id_caja DESC LIMIT 1 FOR UPDATE`
+  );
+  if (res.rows.length === 0) {
+    return {
+      ok: false,
+      message:
+        "No hay cajas abiertas. Debes abrir una caja para poder registrar entregas en efectivo.",
+    };
+  }
+  return { ok: true, idCaja: res.rows[0].id_caja };
+}
+
+// ============================================
 // ENTREGAR (TRANSACCIÓN)
 // ============================================
 const entregar = async (idRecepcion, metodoPago, idUsuario, idCajaUsuario) => {
@@ -202,6 +319,13 @@ const entregar = async (idRecepcion, metodoPago, idUsuario, idCajaUsuario) => {
 
     const esEfectivo = metodoPago !== "QR";
 
+    // ✅ VALIDACIÓN: caja abierta si es efectivo
+    const cajaValida = await validarCajaAbierta(client, idCajaUsuario, esEfectivo);
+    if (!cajaValida.ok) {
+      throw new Error(cajaValida.message);
+    }
+    const idCajaObjetivo = cajaValida.idCaja;
+
     // 1. Venta
     const ventaRes = await client.query(
       `INSERT INTO venta (id_usuario, descripcion, total, metodo_pago)
@@ -232,69 +356,39 @@ const entregar = async (idRecepcion, metodoPago, idUsuario, idCajaUsuario) => {
     );
 
     // 4. Caja solo si es efectivo
-    if (esEfectivo) {
-      let cajaRes;
-
-      // Prioridad 1: la caja asignada al usuario
-      if (idCajaUsuario) {
-        cajaRes = await client.query(
-          `SELECT id_caja, total FROM caja WHERE id_caja = $1 FOR UPDATE`,
-          [idCajaUsuario]
-        );
-      }
-
-      // Fallback: la última caja abierta
-      if (!cajaRes || cajaRes.rows.length === 0) {
-        cajaRes = await client.query(
-          `SELECT id_caja, total FROM caja WHERE estado = 'abierta' ORDER BY id_caja DESC LIMIT 1 FOR UPDATE`
-        );
-      }
-
-      let idCaja;
-      let montoAnterior;
+    if (esEfectivo && idCajaObjetivo) {
+      const cajaRes = await client.query(
+        `SELECT id_caja, total FROM caja WHERE id_caja = $1 FOR UPDATE`,
+        [idCajaObjetivo]
+      );
 
       if (cajaRes.rows.length === 0) {
-        // No hay caja disponible: crear
-        const nuevaCaja = await client.query(
-          `INSERT INTO caja (nombre_caja, total, estado)
-           VALUES ($1, $2, 'abierta')
-           RETURNING id_caja, total`,
-          ["Caja Principal", total]
-        );
-        idCaja = nuevaCaja.rows[0].id_caja;
-        montoAnterior = 0;
-
-        await client.query(
-          `INSERT INTO transaccion_caja
-             (id_caja, id_usuario, monto_nuevo, monto_anterior, monto, tipo_movimiento, descripcion, id_venta)
-           VALUES ($1, $2, $3, $4, $5, 'apertura', $6, $7)`,
-          [idCaja, idUsuario, total, 0, total, "Apertura de caja", idVenta]
-        );
-      } else {
-        idCaja = cajaRes.rows[0].id_caja;
-        montoAnterior = Number(cajaRes.rows[0].total);
-        const montoNuevo = Number((montoAnterior + total).toFixed(2));
-
-        await client.query(
-          `UPDATE caja SET total = $1, estado = 'abierta' WHERE id_caja = $2`,
-          [montoNuevo, idCaja]
-        );
-
-        await client.query(
-          `INSERT INTO transaccion_caja
-             (id_caja, id_usuario, monto_nuevo, monto_anterior, monto, tipo_movimiento, descripcion, id_venta)
-           VALUES ($1, $2, $3, $4, $5, 'ingreso', $6, $7)`,
-          [
-            idCaja,
-            idUsuario,
-            montoNuevo,
-            montoAnterior,
-            total,
-            `Entrega ${cab.codigo_recepcion} (Efectivo) · ${semanas} sem`,
-            idVenta,
-          ]
-        );
+        throw new Error("La caja seleccionada no existe");
       }
+
+      const idCaja = cajaRes.rows[0].id_caja;
+      const montoAnterior = Number(cajaRes.rows[0].total);
+      const montoNuevo = Number((montoAnterior + total).toFixed(2));
+
+      await client.query(
+        `UPDATE caja SET total = $1, estado = 'abierta' WHERE id_caja = $2`,
+        [montoNuevo, idCaja]
+      );
+
+      await client.query(
+        `INSERT INTO transaccion_caja
+           (id_caja, id_usuario, monto_nuevo, monto_anterior, monto, tipo_movimiento, descripcion, id_venta)
+         VALUES ($1, $2, $3, $4, $5, 'ingreso', $6, $7)`,
+        [
+          idCaja,
+          idUsuario,
+          montoNuevo,
+          montoAnterior,
+          total,
+          `Entrega ${cab.codigo_recepcion} (Efectivo) · ${semanas} sem`,
+          idVenta,
+        ]
+      );
     }
 
     await client.query("COMMIT");
@@ -323,4 +417,5 @@ module.exports = {
   buscarRecepciones,
   previewEntrega,
   entregar,
+  estadoCajaUsuario,
 };

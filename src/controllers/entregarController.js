@@ -33,6 +33,32 @@ const preview = async (req, res) => {
 };
 
 // ============================================
+// ESTADO DE CAJA
+// ============================================
+const estadoCaja = async (req, res) => {
+  try {
+    const idUsuario = req.user?.id_usuario;
+    const idCajaUsuario = req.user?.id_caja ?? null;
+
+    if (!idUsuario) {
+      return res.status(401).json({
+        success: false,
+        message: "Usuario no autenticado",
+      });
+    }
+
+    const result = await entregarService.estadoCajaUsuario(idUsuario, idCajaUsuario);
+    res.json(result);
+  } catch (error) {
+    console.error("Error en estadoCaja controller:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error interno del servidor",
+    });
+  }
+};
+
+// ============================================
 // ENTREGAR
 // ============================================
 const entregar = async (req, res) => {
@@ -82,5 +108,6 @@ const entregar = async (req, res) => {
 module.exports = {
   buscar,
   preview,
+  estadoCaja,
   entregar,
 };

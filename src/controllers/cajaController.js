@@ -4,9 +4,18 @@ const cajaService = require("../services/cajaService");
 // ============================================
 // ESTADO ACTUAL DE CAJA
 // ============================================
-const estado = async (_req, res) => {
+const estado = async (req, res) => {
   try {
-    const result = await cajaService.obtenerEstadoCaja();
+    const { idCaja } = req.query;
+    const idUsuario = req.user?.id_usuario;
+    const rol = req.user?.rol;
+
+    const result = await cajaService.obtenerEstadoCaja({
+      idUsuario,
+      rol,
+      idCajaQuery: idCaja ? Number(idCaja) : null,
+    });
+
     res.json(result);
   } catch (error) {
     console.error("Error en estado caja:", error);
@@ -22,14 +31,17 @@ const estado = async (_req, res) => {
 // ============================================
 const listarTransacciones = async (req, res) => {
   try {
-    const { desde, hasta, soloMias } = req.query;
+    const { desde, hasta, soloMias, idCaja } = req.query;
     const idUsuario = req.user?.id_usuario;
+    const rol = req.user?.rol;
 
     const result = await cajaService.listarTransacciones({
       desde: desde ? String(desde) : null,
       hasta: hasta ? String(hasta) : null,
       soloMias: soloMias === "1" || soloMias === "true",
       idUsuario,
+      rol,
+      idCajaQuery: idCaja ? Number(idCaja) : null,
     });
 
     res.json(result);
@@ -47,7 +59,7 @@ const listarTransacciones = async (req, res) => {
 // ============================================
 const registrarMovimiento = async (req, res) => {
   try {
-    const { tipo, descripcion, monto } = req.body;
+    const { tipo, descripcion, monto, idCaja } = req.body;
 
     if (!tipo || typeof tipo !== "string") {
       return res.status(400).json({
@@ -87,6 +99,8 @@ const registrarMovimiento = async (req, res) => {
     }
 
     const idUsuario = req.user?.id_usuario;
+    const rol = req.user?.rol;
+
     if (!idUsuario) {
       return res.status(401).json({
         success: false,
@@ -99,6 +113,8 @@ const registrarMovimiento = async (req, res) => {
       descripcion: descripcion.trim(),
       monto: montoNum,
       idUsuario,
+      rol,
+      idCajaQuery: idCaja ? Number(idCaja) : null,
     });
 
     res.status(result.success ? 201 : 400).json(result);

@@ -8,7 +8,7 @@ const { authenticate } = require("../middleware/loginmiddleware");
 router.get("/", authenticate, controlController.listar);
 
 // Listar estantes (para el combo)
-router.get("/estantes", authenticate, controlController.listarEstantes);
+router.get("/estantes", controlController.listarEstantes);
 
 // Editar estante de un item
 router.put(

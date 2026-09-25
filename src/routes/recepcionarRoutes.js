@@ -12,6 +12,9 @@ router.post("/", authenticate, recepcionarController.crearRecepcion);
 router.get("/", authenticate, recepcionarController.listarRecepciones);
 
 // Personas
+// NUEVA: búsqueda por query params (carnet y/o celular)
+router.get("/persona", authenticate, recepcionarController.buscarPersonaQuery);
+// Compatibilidad: por path param
 router.get("/persona/:carnet", authenticate, recepcionarController.buscarPersona);
 
 // Tamaños

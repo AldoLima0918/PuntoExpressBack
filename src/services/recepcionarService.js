@@ -86,40 +86,113 @@ const crearRecepcion = async (data) => {
 
 // ============================================
 // UPSERT PERSONA
+// Reglas:
+//  - Si viene carnet: buscar por carnet. Si existe, actualizar. Si no, insertar.
+//  - Si NO viene carnet: buscar por celular. Si existe, actualizar. Si no, insertar con carnet autogenerado.
+//  - El celular es único: si ya lo tiene otra persona, se lanza error.
 // ============================================
 async function upsertPersona(client, persona) {
-  const { carnet, nombres, apellidos, celular } = persona;
+  const carnet = (persona.carnet ?? "").trim();
+  const { nombres, apellidos } = persona;
+  const celular = (persona.celular ?? "").trim() || null;
 
-  const existente = await client.query(
-    `SELECT id_persona FROM persona WHERE carnet = $1`,
-    [carnet]
-  );
+  let idPersona = null;
 
-  if (existente.rows.length > 0) {
-    const idPersona = existente.rows[0].id_persona;
+  // 1. Buscar por carnet si viene
+  if (carnet) {
+    const porCarnet = await client.query(
+      `SELECT id_persona FROM persona WHERE carnet = $1`,
+      [carnet]
+    );
+    if (porCarnet.rows.length > 0) {
+      idPersona = porCarnet.rows[0].id_persona;
+    }
+  }
+
+  // 2. Si no se encontró por carnet, buscar por celular
+  if (!idPersona && celular) {
+    const porCelular = await client.query(
+      `SELECT id_persona FROM persona WHERE celular = $1`,
+      [celular]
+    );
+    if (porCelular.rows.length > 0) {
+      idPersona = porCelular.rows[0].id_persona;
+    }
+  }
+
+  // 3. Validar celular único si se va a usar
+  if (celular) {
+    const celularEnUso = await client.query(
+      `SELECT id_persona FROM persona WHERE celular = $1 AND ($2::int IS NULL OR id_persona <> $2)`,
+      [celular, idPersona]
+    );
+    if (celularEnUso.rows.length > 0) {
+      throw new Error(
+        `El celular ${celular} ya está registrado con otra persona.`
+      );
+    }
+  }
+
+  // 4. Actualizar si ya existe
+  if (idPersona) {
     await client.query(
-      `UPDATE persona SET nombres = $1, apellidos = $2, celular = $3 WHERE id_persona = $4`,
+      `UPDATE persona 
+       SET nombres = $1, apellidos = $2, celular = $3
+       WHERE id_persona = $4`,
       [nombres, apellidos, celular, idPersona]
     );
     return idPersona;
   }
 
+  // 5. Insertar nueva persona
+  const carnetFinal = carnet || generarCarnetTemporal();
   const insert = await client.query(
     `INSERT INTO persona (carnet, nombres, apellidos, celular)
      VALUES ($1, $2, $3, $4) RETURNING id_persona`,
-    [carnet, nombres, apellidos, celular]
+    [carnetFinal, nombres, apellidos, celular]
   );
   return insert.rows[0].id_persona;
 }
 
+// Genera un carnet temporal único del estilo "TMP-XXXXXX"
+function generarCarnetTemporal() {
+  const sufijo = Math.floor(100000 + Math.random() * 900000);
+  return `TMP-${sufijo}`;
+}
+
 // ============================================
-// BUSCAR PERSONA
+// BUSCAR PERSONA (por carnet o celular)
 // ============================================
-const buscarPersonaPorCarnet = async (carnet) => {
+const buscarPersona = async ({ carnet, celular }) => {
   try {
+    const carn = (carnet ?? "").trim();
+    const cel = (celular ?? "").trim();
+
+    if (!carn && !cel) {
+      return {
+        success: false,
+        message: "Debes enviar carnet o celular para buscar.",
+      };
+    }
+
+    const condiciones = [];
+    const params = [];
+
+    if (carn) {
+      params.push(carn);
+      condiciones.push(`carnet = $${params.length}`);
+    }
+    if (cel) {
+      params.push(cel);
+      condiciones.push(`celular = $${params.length}`);
+    }
+
     const result = await query(
-      `SELECT id_persona, carnet, nombres, apellidos, celular FROM persona WHERE carnet = $1`,
-      [carnet]
+      `SELECT id_persona, carnet, nombres, apellidos, celular
+       FROM persona
+       WHERE ${condiciones.join(" OR ")}
+       LIMIT 1`,
+      params
     );
 
     if (result.rows.length === 0) {
@@ -140,6 +213,13 @@ const buscarPersonaPorCarnet = async (carnet) => {
     console.error("Error al buscar persona:", error);
     throw error;
   }
+};
+
+// ============================================
+// BUSCAR PERSONA POR CARNET (compatibilidad)
+// ============================================
+const buscarPersonaPorCarnet = async (carnet) => {
+  return buscarPersona({ carnet });
 };
 
 // ============================================
@@ -300,25 +380,29 @@ const eliminarEstante = async (idEstante) => {
 };
 
 // ============================================
-// SIGUIENTE CÓDIGO DE RECEPCIÓN
+// SIGUIENTE CÓDIGO DE RECEPCIÓN (ALEATORIO ÚNICO)
 // ============================================
 const siguienteCodigo = async () => {
   try {
-    const result = await query(
-      `SELECT codigo_recepcion
-       FROM recepcion
-       WHERE codigo_recepcion ~ '^PX-[0-9]+$'`
-    );
+    // Generar un código aleatorio de 6 dígitos y verificar que no exista.
+    // Se intentan hasta 20 veces.
+    for (let intento = 0; intento < 20; intento++) {
+      const numero = Math.floor(100000 + Math.random() * 900000); // 100000 - 999999
+      const codigo = `PX-${numero}`;
 
-    let max = 1000;
-    for (const row of result.rows) {
-      const n = Number(String(row.codigo_recepcion).replace(/\D/g, ""));
-      if (Number.isFinite(n) && n > max) max = n;
+      const existe = await query(
+        `SELECT 1 FROM recepcion WHERE codigo_recepcion = $1`,
+        [codigo]
+      );
+      if (existe.rows.length === 0) {
+        return { success: true, codigo };
+      }
     }
 
+    // Si después de 20 intentos no encontramos uno libre, devolvemos error.
     return {
-      success: true,
-      codigo: `PX-${max + 1}`,
+      success: false,
+      message: "No se pudo generar un código único. Intenta de nuevo.",
     };
   } catch (error) {
     console.error("Error al obtener siguiente código:", error);
@@ -402,6 +486,7 @@ const listarRecepciones = async () => {
 
 module.exports = {
   crearRecepcion,
+  buscarPersona,
   buscarPersonaPorCarnet,
   listarTamanos,
   listarEstantes,

@@ -14,16 +14,41 @@ const crearRecepcion = async (req, res) => {
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ success: false, message: "Debes incluir al menos un paquete" });
     }
-    if (!dejo.carnet || !dejo.nombres || !dejo.apellidos) {
-      return res.status(400).json({ success: false, message: "Completa los datos de quien deja" });
+
+    // Celular obligatorio, carnet opcional
+    if (!dejo.celular) {
+      return res.status(400).json({
+        success: false,
+        message: "La persona que deja debe tener celular.",
+      });
     }
-    if (!recoge.carnet || !recoge.nombres || !recoge.apellidos) {
-      return res.status(400).json({ success: false, message: "Completa los datos de quien recoge" });
+    if (!recoge.celular) {
+      return res.status(400).json({
+        success: false,
+        message: "La persona que recoge debe tener celular.",
+      });
     }
+
+    if (!dejo.nombres || !dejo.apellidos) {
+      return res.status(400).json({
+        success: false,
+        message: "Completa los datos de quien deja",
+      });
+    }
+    if (!recoge.nombres || !recoge.apellidos) {
+      return res.status(400).json({
+        success: false,
+        message: "Completa los datos de quien recoge",
+      });
+    }
+
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
       if (!it.tamano || !it.estante || it.precio == null) {
-        return res.status(400).json({ success: false, message: `El paquete ${i + 1} está incompleto` });
+        return res.status(400).json({
+          success: false,
+          message: `El paquete ${i + 1} está incompleto`,
+        });
       }
       if (it.tamano === "Otro" && (!it.precio || Number(it.precio) <= 0)) {
         return res.status(400).json({
@@ -34,23 +59,49 @@ const crearRecepcion = async (req, res) => {
     }
 
     const result = await recepcionarService.crearRecepcion({
-      codigo_recepcion, zona, dejo, recoge, items,
+      codigo_recepcion,
+      zona,
+      dejo,
+      recoge,
+      items,
     });
     res.status(201).json(result);
   } catch (error) {
     console.error("Error en crearRecepcion controller:", error);
-    res.status(500).json({ success: false, message: error.message || "Error interno del servidor" });
+    res.status(500).json({
+      success: false,
+      message: error.message || "Error interno del servidor",
+    });
   }
 };
 
 // ============================================
-// BUSCAR PERSONA
+// BUSCAR PERSONA (por carnet o celular)
+// GET /api/recepcion/persona?carnet=...&celular=...
+// ============================================
+const buscarPersonaQuery = async (req, res) => {
+  try {
+    const { carnet, celular } = req.query;
+    const result = await recepcionarService.buscarPersona({ carnet, celular });
+    if (!result.success) return res.status(404).json(result);
+    res.json(result);
+  } catch (error) {
+    console.error("Error en buscarPersonaQuery controller:", error);
+    res.status(500).json({ success: false, message: "Error interno del servidor" });
+  }
+};
+
+// ============================================
+// BUSCAR PERSONA POR CARNET (compatibilidad)
+// GET /api/recepcion/persona/:carnet
 // ============================================
 const buscarPersona = async (req, res) => {
   try {
     const { carnet } = req.params;
-    if (!carnet) return res.status(400).json({ success: false, message: "Carnet requerido" });
-    const result = await recepcionarService.buscarPersonaPorCarnet(carnet);
+    if (!carnet) {
+      return res.status(400).json({ success: false, message: "Carnet requerido" });
+    }
+    const result = await recepcionarService.buscarPersona({ carnet });
     if (!result.success) return res.status(404).json(result);
     res.json(result);
   } catch (error) {
@@ -162,6 +213,7 @@ const listarRecepciones = async (req, res) => {
 
 module.exports = {
   crearRecepcion,
+  buscarPersonaQuery,
   buscarPersona,
   listarTamanos,
   listarEstantes,

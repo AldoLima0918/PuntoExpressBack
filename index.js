@@ -6,6 +6,7 @@ const app = express();
 
 const allowedOrigins = [
   "http://localhost:8080",
+  "puntoexpress.spiderlabsystems.com",
 ];
 
 const corsOptions = {

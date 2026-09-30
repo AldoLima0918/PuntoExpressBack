@@ -52,6 +52,7 @@ const listarVentas = async ({ desde, hasta, idUsuario, esAdmin, idCaja }) => {
     const ventas = [];
 
     for (const v of ventasRes.rows) {
+      // Traer TODAS las recepciones asociadas a la venta
       const detalleRes = await query(
         `SELECT DISTINCT
             r.codigo_recepcion,
@@ -62,18 +63,21 @@ const listarVentas = async ({ desde, hasta, idUsuario, esAdmin, idCaja }) => {
          INNER JOIN recepcion r
            ON tr.id_recepcion = r.id_recepcion
          WHERE dv.id_venta = $1
-         LIMIT 1`,
+         ORDER BY r.codigo_recepcion`,
         [v.id_venta]
       );
 
-      let codigoRecepcion = null;
+      const codigosRecepcion = detalleRes.rows.map(
+        (row) => row.codigo_recepcion
+      );
+
+      // Si la venta está asociada a una sola recepción (o varias),
+      // tomamos el cliente de la PRIMERA recepción (todas son de la misma persona
+      // cuando se usa "entregar seleccionadas").
       let clienteNombre = null;
       let clienteApellido = null;
-
       if (detalleRes.rows.length > 0) {
-        codigoRecepcion = detalleRes.rows[0].codigo_recepcion;
         const idRecepcion = detalleRes.rows[0].id_recepcion;
-
         const clienteRes = await query(
           `SELECT p.nombres, p.apellidos
            FROM persona_recepcion pr
@@ -99,7 +103,10 @@ const listarVentas = async ({ desde, hasta, idUsuario, esAdmin, idCaja }) => {
         usuario_apellido: v.usuario_apellido,
         id_caja: v.id_caja ?? null,
         nombre_caja: v.nombre_caja ?? null,
-        codigo_recepcion: codigoRecepcion,
+        // Array con todas las recepciones asociadas
+        codigos_recepcion: codigosRecepcion,
+        // Compatibilidad: primera recepción (por si algo lo usa)
+        codigo_recepcion: codigosRecepcion[0] ?? null,
         cliente_nombre: clienteNombre,
         cliente_apellido: clienteApellido,
       });

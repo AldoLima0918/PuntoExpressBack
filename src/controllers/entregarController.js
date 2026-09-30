@@ -59,16 +59,30 @@ const estadoCaja = async (req, res) => {
 };
 
 // ============================================
-// ENTREGAR
+// ENTREGAR (una o varias recepciones)
 // ============================================
 const entregar = async (req, res) => {
   try {
-    const { id_recepcion, metodo_pago } = req.body;
+    const { id_recepcion, id_recepciones, metodo_pago } = req.body;
 
-    if (!id_recepcion || !metodo_pago) {
+    // Acepta tanto id_recepcion (single) como id_recepciones (array)
+    let ids = [];
+    if (Array.isArray(id_recepciones) && id_recepciones.length > 0) {
+      ids = id_recepciones;
+    } else if (id_recepcion) {
+      ids = [id_recepcion];
+    }
+
+    if (ids.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "Faltan datos: id_recepcion y metodo_pago son obligatorios",
+        message: "Faltan datos: id_recepcion o id_recepciones son obligatorios",
+      });
+    }
+    if (!metodo_pago) {
+      return res.status(400).json({
+        success: false,
+        message: "Falta el método de pago",
       });
     }
     if (metodo_pago !== "Efectivo" && metodo_pago !== "QR") {
@@ -88,8 +102,8 @@ const entregar = async (req, res) => {
       });
     }
 
-    const result = await entregarService.entregar(
-      Number(id_recepcion),
+    const result = await entregarService.entregarMultiple(
+      ids,
       metodo_pago,
       idUsuario,
       idCajaUsuario

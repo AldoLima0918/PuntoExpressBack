@@ -13,7 +13,8 @@ router.get("/buscar", authenticate, entregarController.buscar);
 // Preview del monto a cobrar
 router.get("/preview/:id", authenticate, entregarController.preview);
 
-// Entregar una recepción
+// Entregar una o varias recepciones
+// body: { id_recepcion?: number, id_recepciones?: number[], metodo_pago: "Efectivo" | "QR" }
 router.post("/", authenticate, entregarController.entregar);
 
 module.exports = router;

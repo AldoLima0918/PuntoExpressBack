@@ -163,7 +163,6 @@ const previewEntrega = async (idRecepcion) => {
 // ============================================
 const estadoCajaUsuario = async (idUsuario, idCajaUsuario) => {
   try {
-    // Caso 1: el usuario tiene caja asignada
     if (idCajaUsuario) {
       const res = await query(
         `SELECT id_caja, nombre_caja, total, estado
@@ -197,7 +196,6 @@ const estadoCajaUsuario = async (idUsuario, idCajaUsuario) => {
       };
     }
 
-    // Caso 2: el usuario no tiene caja asignada → buscamos la última abierta
     const res = await query(
       `SELECT id_caja, nombre_caja, total, estado
        FROM caja
@@ -238,10 +236,8 @@ const estadoCajaUsuario = async (idUsuario, idCajaUsuario) => {
 // VALIDAR CAJA ANTES DE ENTREGAR
 // ============================================
 async function validarCajaAbierta(client, idCajaUsuario, esEfectivo) {
-  // Si es QR, no se exige caja abierta
   if (!esEfectivo) return { ok: true, idCaja: null };
 
-  // Si el usuario tiene caja asignada, debe estar abierta
   if (idCajaUsuario) {
     const res = await client.query(
       `SELECT id_caja, estado FROM caja WHERE id_caja = $1 FOR UPDATE`,
@@ -261,7 +257,6 @@ async function validarCajaAbierta(client, idCajaUsuario, esEfectivo) {
     return { ok: true, idCaja: c.id_caja };
   }
 
-  // Si no tiene caja asignada, debe existir al menos una caja abierta
   const res = await client.query(
     `SELECT id_caja, estado FROM caja WHERE estado = 'abierta' ORDER BY id_caja DESC LIMIT 1 FOR UPDATE`
   );
@@ -276,71 +271,125 @@ async function validarCajaAbierta(client, idCajaUsuario, esEfectivo) {
 }
 
 // ============================================
-// ENTREGAR (TRANSACCIÓN)
+// ENTREGAR (TRANSACCIÓN) — UNA SOLA RECEPCIÓN
 // ============================================
 const entregar = async (idRecepcion, metodoPago, idUsuario, idCajaUsuario) => {
+  return entregarMultiple([idRecepcion], metodoPago, idUsuario, idCajaUsuario);
+};
+
+// ============================================
+// ENTREGAR MÚLTIPLES RECEPCIONES (TRANSACCIÓN)
+// ============================================
+const entregarMultiple = async (
+  idsRecepcion,
+  metodoPago,
+  idUsuario,
+  idCajaUsuario
+) => {
+  if (!Array.isArray(idsRecepcion) || idsRecepcion.length === 0) {
+    throw new Error("Debes seleccionar al menos una recepción");
+  }
+
+  // Normalizar ids únicos
+  const idsUnicos = [...new Set(idsRecepcion.map((n) => Number(n)))];
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
+    // 1. Bloquear y validar TODAS las recepciones
     const cabRes = await client.query(
       `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, estado
        FROM recepcion
-       WHERE id_recepcion = $1
+       WHERE id_recepcion = ANY($1::int[])
        FOR UPDATE`,
-      [idRecepcion]
+      [idsUnicos]
     );
-    if (cabRes.rows.length === 0) {
-      throw new Error("Recepción no encontrada");
-    }
-    const cab = cabRes.rows[0];
-    if (cab.estado !== "pendiente") {
-      throw new Error("La recepción ya no está pendiente");
+
+    if (cabRes.rows.length !== idsUnicos.length) {
+      throw new Error("Una o más recepciones no fueron encontradas");
     }
 
+    for (const cab of cabRes.rows) {
+      if (cab.estado !== "pendiente") {
+        throw new Error(
+          `La recepción ${cab.codigo_recepcion} ya no está pendiente`
+        );
+      }
+    }
+
+    // 2. Obtener TODOS los items de TODAS las recepciones
     const itemsRes = await client.query(
-      `SELECT tr.id_tamano_recepcion, tr.precio_tamano
+      `SELECT tr.id_tamano_recepcion, tr.precio_tamano, tr.id_recepcion
        FROM tamano_recepcion tr
-       WHERE tr.id_recepcion = $1`,
-      [idRecepcion]
+       WHERE tr.id_recepcion = ANY($1::int[])`,
+      [idsUnicos]
     );
+
     if (itemsRes.rows.length === 0) {
-      throw new Error("La recepción no tiene items");
+      throw new Error("Las recepciones seleccionadas no tienen items");
     }
 
-    const base = itemsRes.rows.reduce(
-      (s, it) => s + Number(it.precio_tamano),
-      0
-    );
-    const { total, semanas, multiplicador } = calcularTotal(
-      base,
-      cab.fecha_recepcion
-    );
+    // 3. Calcular total combinado
+    let totalGeneral = 0;
+    const detallesPorRecepcion = [];
+
+    for (const cab of cabRes.rows) {
+      const itemsRecepcion = itemsRes.rows.filter(
+        (it) => it.id_recepcion === cab.id_recepcion
+      );
+      const baseRecepcion = itemsRecepcion.reduce(
+        (s, it) => s + Number(it.precio_tamano),
+        0
+      );
+      const { total, semanas, multiplicador } = calcularTotal(
+        baseRecepcion,
+        cab.fecha_recepcion
+      );
+      totalGeneral += total;
+      detallesPorRecepcion.push({
+        id_recepcion: cab.id_recepcion,
+        codigo_recepcion: cab.codigo_recepcion,
+        base: baseRecepcion,
+        total,
+        semanas,
+        multiplicador,
+        items: itemsRecepcion,
+      });
+    }
+    totalGeneral = Number(totalGeneral.toFixed(2));
 
     const esEfectivo = metodoPago !== "QR";
 
-    // ✅ VALIDACIÓN: caja abierta si es efectivo
+    // 4. Validar caja si es efectivo
     const cajaValida = await validarCajaAbierta(client, idCajaUsuario, esEfectivo);
     if (!cajaValida.ok) {
       throw new Error(cajaValida.message);
     }
     const idCajaObjetivo = cajaValida.idCaja;
 
-    // 1. Venta
+    // 5. Crear UNA sola venta con el total combinado
+    const descripcion = detallesPorRecepcion
+      .map(
+        (d) =>
+          `${d.codigo_recepcion} (${d.semanas} sem · x${d.multiplicador} · ${d.items.length} paq)`
+      )
+      .join(" | ");
+
     const ventaRes = await client.query(
       `INSERT INTO venta (id_usuario, descripcion, total, metodo_pago)
        VALUES ($1, $2, $3, $4)
        RETURNING id_venta`,
       [
         idUsuario,
-        `Entrega de recepción ${cab.codigo_recepcion} · ${semanas} semana(s) · x${multiplicador}`,
-        total,
+        `Entrega múltiple: ${descripcion}`,
+        totalGeneral,
         esEfectivo ? "Efectivo" : "QR",
       ]
     );
     const idVenta = ventaRes.rows[0].id_venta;
 
-    // 2. Detalle
+    // 6. Detalle de venta (todos los items de todas las recepciones)
     for (const it of itemsRes.rows) {
       await client.query(
         `INSERT INTO detalle_venta (id_venta, id_tamano_recepcion)
@@ -349,13 +398,14 @@ const entregar = async (idRecepcion, metodoPago, idUsuario, idCajaUsuario) => {
       );
     }
 
-    // 3. Marcar recepción como entregada
+    // 7. Marcar TODAS las recepciones como entregadas
     await client.query(
-      `UPDATE recepcion SET estado = 'entregado' WHERE id_recepcion = $1`,
-      [idRecepcion]
+      `UPDATE recepcion SET estado = 'entregado'
+       WHERE id_recepcion = ANY($1::int[])`,
+      [idsUnicos]
     );
 
-    // 4. Caja solo si es efectivo
+    // 8. Afectar caja solo si es efectivo
     if (esEfectivo && idCajaObjetivo) {
       const cajaRes = await client.query(
         `SELECT id_caja, total FROM caja WHERE id_caja = $1 FOR UPDATE`,
@@ -368,7 +418,7 @@ const entregar = async (idRecepcion, metodoPago, idUsuario, idCajaUsuario) => {
 
       const idCaja = cajaRes.rows[0].id_caja;
       const montoAnterior = Number(cajaRes.rows[0].total);
-      const montoNuevo = Number((montoAnterior + total).toFixed(2));
+      const montoNuevo = Number((montoAnterior + totalGeneral).toFixed(2));
 
       await client.query(
         `UPDATE caja SET total = $1, estado = 'abierta' WHERE id_caja = $2`,
@@ -384,8 +434,8 @@ const entregar = async (idRecepcion, metodoPago, idUsuario, idCajaUsuario) => {
           idUsuario,
           montoNuevo,
           montoAnterior,
-          total,
-          `Entrega ${cab.codigo_recepcion} (Efectivo) · ${semanas} sem`,
+          totalGeneral,
+          `Entrega múltiple (${idsUnicos.length} recepciones) - Efectivo`,
           idVenta,
         ]
       );
@@ -396,17 +446,24 @@ const entregar = async (idRecepcion, metodoPago, idUsuario, idCajaUsuario) => {
     return {
       success: true,
       id_venta: idVenta,
-      total,
-      semanas,
-      multiplicador,
+      total: totalGeneral,
+      recepciones_entregadas: idsUnicos.length,
+      codigos: detallesPorRecepcion.map((d) => d.codigo_recepcion),
+      detalles: detallesPorRecepcion.map((d) => ({
+        id_recepcion: d.id_recepcion,
+        codigo_recepcion: d.codigo_recepcion,
+        total: d.total,
+        semanas: d.semanas,
+        multiplicador: d.multiplicador,
+      })),
       metodo_pago: esEfectivo ? "Efectivo" : "QR",
       message: esEfectivo
-        ? "Recepción entregada exitosamente (afecta caja)"
-        : "Recepción entregada exitosamente (no afecta caja)",
+        ? `Se entregaron ${idsUnicos.length} recepción(es) (afecta caja)`
+        : `Se entregaron ${idsUnicos.length} recepción(es) (no afecta caja)`,
     };
   } catch (error) {
     await client.query("ROLLBACK");
-    console.error("Error al entregar recepción:", error);
+    console.error("Error al entregar recepciones:", error);
     throw error;
   } finally {
     client.release();
@@ -417,5 +474,6 @@ module.exports = {
   buscarRecepciones,
   previewEntrega,
   entregar,
+  entregarMultiple,
   estadoCajaUsuario,
 };

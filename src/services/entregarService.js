@@ -416,12 +416,23 @@ const entregarMultiple = async (
     }
     const idCajaObjetivo = cajaValida.idCaja;
 
-    const descripcion = detallesPorRecepcion
+    // ── Construir descripción detallada por recepción ──
+    // Ej: "PX-1006 (0 sem · x1 · 2 paq) | PX-401357 (0 sem · x1 · 1 paq)"
+    const descripcionDetalle = detallesPorRecepcion
       .map(
         (d) =>
           `${d.codigo_recepcion} (${d.semanas} sem · x${d.multiplicador} · ${d.items.length} paq)`
       )
       .join(" | ");
+
+    // Descripción para la VENTA
+    const descripcionVenta =
+      detallesPorRecepcion.length > 1
+        ? `Entrega múltiple: ${descripcionDetalle}`
+        : `Entrega ${descripcionDetalle}`;
+
+    // Descripción para la TRANSACCIÓN DE CAJA (mismo formato)
+    const descripcionCaja = descripcionVenta;
 
     const ventaRes = await client.query(
       `INSERT INTO venta (id_usuario, descripcion, total, metodo_pago)
@@ -429,7 +440,7 @@ const entregarMultiple = async (
        RETURNING id_venta`,
       [
         idUsuario,
-        `Entrega múltiple: ${descripcion}`,
+        descripcionVenta,
         totalGeneral,
         esEfectivo ? "Efectivo" : "QR",
       ]
@@ -479,7 +490,7 @@ const entregarMultiple = async (
           montoNuevo,
           montoAnterior,
           totalGeneral,
-          `Entrega múltiple (${idsUnicos.length} recepciones) - Efectivo`,
+          descripcionCaja,
           idVenta,
         ]
       );

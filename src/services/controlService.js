@@ -47,8 +47,9 @@ const listarRecepcionesActivas = async () => {
           }
         : null;
 
+      // ✅ Incluimos tr.descripcion
       const itemsRes = await query(
-        `SELECT tr.id_tamano_recepcion, tr.precio_tamano,
+        `SELECT tr.id_tamano_recepcion, tr.precio_tamano, tr.descripcion,
                 t.tamano, e.estante, e.id_estante
          FROM tamano_recepcion tr
          INNER JOIN tamano t ON tr.id_tamano = t.id_tamano
@@ -64,6 +65,7 @@ const listarRecepcionesActivas = async () => {
         estante: it.estante,
         estante_id: it.id_estante,
         precio_tamano: Number(it.precio_tamano),
+        descripcion: it.descripcion, // ✅ NUEVO
       }));
 
       const base = items.reduce((s, it) => s + it.precio_tamano, 0);

@@ -28,6 +28,13 @@ const crearRecepcion = async (data) => {
     const idDejo = await upsertPersona(client, dejo);
     const idRecoge = await upsertPersona(client, recoge);
 
+    // ✅ VALIDACIÓN: la persona que deja NO puede ser la que recoge
+    if (idDejo === idRecoge) {
+      throw new Error(
+        "La persona que deja el producto no puede ser la misma que lo recoge."
+      );
+    }
+
     await client.query(
       `INSERT INTO persona_recepcion (id_recepcion, id_persona, tipo)
        VALUES ($1, $2, 'deja'), ($1, $3, 'recoge')`,
@@ -59,11 +66,18 @@ const crearRecepcion = async (data) => {
         throw new Error(`Precio inválido en el paquete: ${item.precio}`);
       }
 
+      const descripcion = (item.descripcion ?? "").trim();
+      if (!descripcion) {
+        throw new Error(
+          `La descripción del paquete (tamaño ${item.tamano}) es obligatoria.`
+        );
+      }
+
       await client.query(
         `INSERT INTO tamano_recepcion 
-           (id_recepcion, id_tamano, precio_tamano, id_estante)
-         VALUES ($1, $2, $3, $4)`,
-        [idRecepcion, idTamano, precio, idEstante]
+           (id_recepcion, id_tamano, precio_tamano, id_estante, descripcion)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [idRecepcion, idTamano, precio, idEstante, descripcion]
       );
     }
 
@@ -86,19 +100,14 @@ const crearRecepcion = async (data) => {
 
 // ============================================
 // UPSERT PERSONA
-// Reglas:
-//  - Si viene carnet: buscar por carnet. Si existe, actualizar. Si no, insertar.
-//  - Si NO viene carnet: buscar por celular. Si existe, actualizar. Si no, insertar con carnet autogenerado.
-//  - El celular es único: si ya lo tiene otra persona, se lanza error.
 // ============================================
 async function upsertPersona(client, persona) {
-  const carnet = (persona.carnet ?? "").trim();
+  const carnet = (persona.carnet ?? "").trim() || null;
   const { nombres, apellidos } = persona;
   const celular = (persona.celular ?? "").trim() || null;
 
   let idPersona = null;
 
-  // 1. Buscar por carnet si viene
   if (carnet) {
     const porCarnet = await client.query(
       `SELECT id_persona FROM persona WHERE carnet = $1`,
@@ -109,7 +118,6 @@ async function upsertPersona(client, persona) {
     }
   }
 
-  // 2. Si no se encontró por carnet, buscar por celular
   if (!idPersona && celular) {
     const porCelular = await client.query(
       `SELECT id_persona FROM persona WHERE celular = $1`,
@@ -120,7 +128,6 @@ async function upsertPersona(client, persona) {
     }
   }
 
-  // 3. Validar celular único si se va a usar
   if (celular) {
     const celularEnUso = await client.query(
       `SELECT id_persona FROM persona WHERE celular = $1 AND ($2::int IS NULL OR id_persona <> $2)`,
@@ -133,31 +140,22 @@ async function upsertPersona(client, persona) {
     }
   }
 
-  // 4. Actualizar si ya existe
   if (idPersona) {
     await client.query(
       `UPDATE persona 
-       SET nombres = $1, apellidos = $2, celular = $3
-       WHERE id_persona = $4`,
-      [nombres, apellidos, celular, idPersona]
+       SET nombres = $1, apellidos = $2, celular = $3, carnet = COALESCE($4, carnet)
+       WHERE id_persona = $5`,
+      [nombres, apellidos, celular, carnet, idPersona]
     );
     return idPersona;
   }
 
-  // 5. Insertar nueva persona
-  const carnetFinal = carnet || generarCarnetTemporal();
   const insert = await client.query(
     `INSERT INTO persona (carnet, nombres, apellidos, celular)
      VALUES ($1, $2, $3, $4) RETURNING id_persona`,
-    [carnetFinal, nombres, apellidos, celular]
+    [carnet, nombres, apellidos, celular]
   );
   return insert.rows[0].id_persona;
-}
-
-// Genera un carnet temporal único del estilo "TMP-XXXXXX"
-function generarCarnetTemporal() {
-  const sufijo = Math.floor(100000 + Math.random() * 900000);
-  return `TMP-${sufijo}`;
 }
 
 // ============================================
@@ -215,9 +213,6 @@ const buscarPersona = async ({ carnet, celular }) => {
   }
 };
 
-// ============================================
-// BUSCAR PERSONA POR CARNET (compatibilidad)
-// ============================================
 const buscarPersonaPorCarnet = async (carnet) => {
   return buscarPersona({ carnet });
 };
@@ -380,14 +375,12 @@ const eliminarEstante = async (idEstante) => {
 };
 
 // ============================================
-// SIGUIENTE CÓDIGO DE RECEPCIÓN (ALEATORIO ÚNICO)
+// SIGUIENTE CÓDIGO DE RECEPCIÓN
 // ============================================
 const siguienteCodigo = async () => {
   try {
-    // Generar un código aleatorio de 6 dígitos y verificar que no exista.
-    // Se intentan hasta 20 veces.
     for (let intento = 0; intento < 20; intento++) {
-      const numero = Math.floor(100000 + Math.random() * 900000); // 100000 - 999999
+      const numero = Math.floor(100000 + Math.random() * 900000);
       const codigo = `PX-${numero}`;
 
       const existe = await query(
@@ -399,7 +392,6 @@ const siguienteCodigo = async () => {
       }
     }
 
-    // Si después de 20 intentos no encontramos uno libre, devolvemos error.
     return {
       success: false,
       message: "No se pudo generar un código único. Intenta de nuevo.",
@@ -440,7 +432,8 @@ const listarRecepciones = async () => {
       const recoge = personasRes.rows.find((p) => p.tipo === "recoge") || null;
 
       const itemsRes = await query(
-        `SELECT tr.id_tamano_recepcion, tr.precio_tamano, t.tamano, e.estante
+        `SELECT tr.id_tamano_recepcion, tr.precio_tamano, tr.descripcion,
+                t.tamano, e.estante
          FROM tamano_recepcion tr
          INNER JOIN tamano t ON tr.id_tamano = t.id_tamano
          LEFT JOIN estante e ON tr.id_estante = e.id_estante
@@ -453,6 +446,7 @@ const listarRecepciones = async () => {
         precio_tamano: it.precio_tamano == null ? null : Number(it.precio_tamano),
         tamano: it.tamano,
         estante: it.estante,
+        descripcion: it.descripcion,
       }));
 
       const base = items.reduce((s, it) => s + (it.precio_tamano ?? 0), 0);

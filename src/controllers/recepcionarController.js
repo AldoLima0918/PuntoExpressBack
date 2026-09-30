@@ -15,7 +15,6 @@ const crearRecepcion = async (req, res) => {
       return res.status(400).json({ success: false, message: "Debes incluir al menos un paquete" });
     }
 
-    // Celular obligatorio, carnet opcional
     if (!dejo.celular) {
       return res.status(400).json({
         success: false,
@@ -42,6 +41,27 @@ const crearRecepcion = async (req, res) => {
       });
     }
 
+    // ✅ VALIDACIÓN: no pueden ser la misma persona
+    const celDejo = String(dejo.celular).trim();
+    const celRecoge = String(recoge.celular).trim();
+    const carDejo = String(dejo.carnet ?? "").trim();
+    const carRecoge = String(recoge.carnet ?? "").trim();
+
+    if (celDejo && celRecoge && celDejo === celRecoge) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "La persona que deja el producto no puede ser la misma que lo recoge (mismo celular).",
+      });
+    }
+    if (carDejo && carRecoge && carDejo === carRecoge) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "La persona que deja el producto no puede ser la misma que lo recoge (mismo carnet).",
+      });
+    }
+
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
       if (!it.tamano || !it.estante || it.precio == null) {
@@ -54,6 +74,12 @@ const crearRecepcion = async (req, res) => {
         return res.status(400).json({
           success: false,
           message: `El paquete ${i + 1} tiene tamaño "Otro": debes indicar un precio mayor a 0`,
+        });
+      }
+      if (!it.descripcion || !String(it.descripcion).trim()) {
+        return res.status(400).json({
+          success: false,
+          message: `El paquete ${i + 1} debe tener una descripción.`,
         });
       }
     }
@@ -77,7 +103,6 @@ const crearRecepcion = async (req, res) => {
 
 // ============================================
 // BUSCAR PERSONA (por carnet o celular)
-// GET /api/recepcion/persona?carnet=...&celular=...
 // ============================================
 const buscarPersonaQuery = async (req, res) => {
   try {
@@ -93,7 +118,6 @@ const buscarPersonaQuery = async (req, res) => {
 
 // ============================================
 // BUSCAR PERSONA POR CARNET (compatibilidad)
-// GET /api/recepcion/persona/:carnet
 // ============================================
 const buscarPersona = async (req, res) => {
   try {

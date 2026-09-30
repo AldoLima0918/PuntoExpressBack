@@ -8,6 +8,8 @@ const {
 
 // ============================================
 // BUSCAR RECEPCIONES PENDIENTES
+// Devuelve coincidencias directas + todas las
+// recepciones pendientes del mismo "recoge".
 // ============================================
 const buscarRecepciones = async (q) => {
   try {
@@ -16,7 +18,8 @@ const buscarRecepciones = async (q) => {
 
     const like = `%${texto}%`;
 
-    const recepcionesRes = await query(
+    // 1. Coincidencias directas (código, carnet, nombre, celular, descripción)
+    const directasRes = await query(
       `SELECT DISTINCT r.id_recepcion
        FROM recepcion r
        LEFT JOIN persona_recepcion pr_deja
@@ -25,6 +28,7 @@ const buscarRecepciones = async (q) => {
        LEFT JOIN persona_recepcion pr_recoge
          ON pr_recoge.id_recepcion = r.id_recepcion AND pr_recoge.tipo = 'recoge'
        LEFT JOIN persona p_recoge ON pr_recoge.id_persona = p_recoge.id_persona
+       LEFT JOIN tamano_recepcion tr ON tr.id_recepcion = r.id_recepcion
        WHERE r.estado = 'pendiente'
          AND (
            r.codigo_recepcion ILIKE $1
@@ -32,17 +36,65 @@ const buscarRecepciones = async (q) => {
            OR p_recoge.carnet ILIKE $1
            OR (p_recoge.nombres || ' ' || p_recoge.apellidos) ILIKE $1
            OR p_recoge.celular ILIKE $1
+           OR tr.descripcion ILIKE $1
          )
        ORDER BY r.id_recepcion DESC
        LIMIT 50`,
       [like]
     );
 
+    const idsDirectos = directasRes.rows.map((r) => r.id_recepcion);
+
+    if (idsDirectos.length === 0) {
+      return { success: true, recepciones: [] };
+    }
+
+    // 2. Obtener los id_persona de "recoge" involucrados
+    const recogeRes = await query(
+      `SELECT DISTINCT pr.id_persona
+       FROM persona_recepcion pr
+       WHERE pr.id_recepcion = ANY($1::int[])
+         AND pr.tipo = 'recoge'`,
+      [idsDirectos]
+    );
+
+    const idsRecoge = recogeRes.rows.map((r) => r.id_persona);
+
+    let idsRelacionados = [];
+    if (idsRecoge.length > 0) {
+      // 3. Todas las recepciones pendientes del mismo "recoge"
+      const relacionadasRes = await query(
+        `SELECT DISTINCT r.id_recepcion
+         FROM recepcion r
+         INNER JOIN persona_recepcion pr
+           ON pr.id_recepcion = r.id_recepcion AND pr.tipo = 'recoge'
+         WHERE r.estado = 'pendiente'
+           AND pr.id_persona = ANY($1::int[])`,
+        [idsRecoge]
+      );
+      idsRelacionados = relacionadasRes.rows.map((r) => r.id_recepcion);
+    }
+
+    // 4. Unión sin duplicados (directos primero, luego los del mismo recoge)
+    const idsFinales = [
+      ...new Set([...idsDirectos, ...idsRelacionados]),
+    ];
+
+    // 5. Cargar el detalle completo de cada recepción
     const recepciones = [];
-    for (const row of recepcionesRes.rows) {
-      const detalle = await obtenerRecepcionCompleta(row.id_recepcion);
+    for (const id of idsFinales) {
+      const detalle = await obtenerRecepcionCompleta(id);
       if (detalle) recepciones.push(detalle);
     }
+
+    // 6. Ordenar: primero las coincidencias directas, luego el resto
+    const setDirectos = new Set(idsDirectos);
+    recepciones.sort((a, b) => {
+      const aDir = setDirectos.has(a.id_recepcion) ? 0 : 1;
+      const bDir = setDirectos.has(b.id_recepcion) ? 0 : 1;
+      if (aDir !== bDir) return aDir - bDir;
+      return b.id_recepcion - a.id_recepcion;
+    });
 
     return { success: true, recepciones };
   } catch (error) {
@@ -92,7 +144,7 @@ const obtenerRecepcionCompleta = async (idRecepcion) => {
     : null;
 
   const itemsRes = await query(
-    `SELECT tr.id_tamano_recepcion, tr.precio_tamano,
+    `SELECT tr.id_tamano_recepcion, tr.precio_tamano, tr.descripcion,
             t.tamano, e.estante
      FROM tamano_recepcion tr
      INNER JOIN tamano t ON tr.id_tamano = t.id_tamano
@@ -107,6 +159,7 @@ const obtenerRecepcionCompleta = async (idRecepcion) => {
     tamano: it.tamano,
     estante: it.estante,
     precio_tamano: Number(it.precio_tamano),
+    descripcion: it.descripcion,
   }));
 
   const base = items.reduce((s, it) => s + it.precio_tamano, 0);
@@ -290,14 +343,12 @@ const entregarMultiple = async (
     throw new Error("Debes seleccionar al menos una recepción");
   }
 
-  // Normalizar ids únicos
   const idsUnicos = [...new Set(idsRecepcion.map((n) => Number(n)))];
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    // 1. Bloquear y validar TODAS las recepciones
     const cabRes = await client.query(
       `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, estado
        FROM recepcion
@@ -318,7 +369,6 @@ const entregarMultiple = async (
       }
     }
 
-    // 2. Obtener TODOS los items de TODAS las recepciones
     const itemsRes = await client.query(
       `SELECT tr.id_tamano_recepcion, tr.precio_tamano, tr.id_recepcion
        FROM tamano_recepcion tr
@@ -330,7 +380,6 @@ const entregarMultiple = async (
       throw new Error("Las recepciones seleccionadas no tienen items");
     }
 
-    // 3. Calcular total combinado
     let totalGeneral = 0;
     const detallesPorRecepcion = [];
 
@@ -361,14 +410,12 @@ const entregarMultiple = async (
 
     const esEfectivo = metodoPago !== "QR";
 
-    // 4. Validar caja si es efectivo
     const cajaValida = await validarCajaAbierta(client, idCajaUsuario, esEfectivo);
     if (!cajaValida.ok) {
       throw new Error(cajaValida.message);
     }
     const idCajaObjetivo = cajaValida.idCaja;
 
-    // 5. Crear UNA sola venta con el total combinado
     const descripcion = detallesPorRecepcion
       .map(
         (d) =>
@@ -389,7 +436,6 @@ const entregarMultiple = async (
     );
     const idVenta = ventaRes.rows[0].id_venta;
 
-    // 6. Detalle de venta (todos los items de todas las recepciones)
     for (const it of itemsRes.rows) {
       await client.query(
         `INSERT INTO detalle_venta (id_venta, id_tamano_recepcion)
@@ -398,14 +444,12 @@ const entregarMultiple = async (
       );
     }
 
-    // 7. Marcar TODAS las recepciones como entregadas
     await client.query(
       `UPDATE recepcion SET estado = 'entregado'
        WHERE id_recepcion = ANY($1::int[])`,
       [idsUnicos]
     );
 
-    // 8. Afectar caja solo si es efectivo
     if (esEfectivo && idCajaObjetivo) {
       const cajaRes = await client.query(
         `SELECT id_caja, total FROM caja WHERE id_caja = $1 FOR UPDATE`,

@@ -6,7 +6,7 @@ const app = express();
 
 const allowedOrigins = [
   "http://localhost:8080",
-  "https://puntoexpress.spiderlabsystems.com",
+  "https://puntoclick.spiderlabsystems.com",
   "https://puntoexpressback.onrender.com",
 ];
 

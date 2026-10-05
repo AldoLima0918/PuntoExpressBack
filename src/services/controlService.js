@@ -11,8 +11,20 @@ const {
 // ============================================
 const listarRecepcionesActivas = async () => {
   try {
+    // ✅ FIX ZONA HORARIA:
+    // to_char devuelve la fecha como string "YYYY-MM-DDTHH:mm:ss" SIN zona.
+    // Así el frontend NO la convierte a UTC y se imprime la hora real.
+    //
+    // ⚠️ Si tu columna es `timestamptz` (con zona) y guarda en UTC,
+    // cambia la línea del to_char por:
+    //   to_char(fecha_recepcion AT TIME ZONE 'America/La_Paz',
+    //           'YYYY-MM-DD"T"HH24:MI:SS') AS fecha_recepcion,
     const cabeceras = await query(
-      `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, zona, estado
+      `SELECT id_recepcion,
+              codigo_recepcion,
+              to_char(fecha_recepcion, 'YYYY-MM-DD"T"HH24:MI:SS') AS fecha_recepcion,
+              zona,
+              estado
        FROM recepcion
        WHERE estado = 'pendiente'
        ORDER BY fecha_recepcion ASC`
@@ -65,10 +77,13 @@ const listarRecepcionesActivas = async () => {
         estante: it.estante,
         estante_id: it.id_estante,
         precio_tamano: Number(it.precio_tamano),
-        descripcion: it.descripcion, // ✅ NUEVO
+        descripcion: it.descripcion,
       }));
 
       const base = items.reduce((s, it) => s + it.precio_tamano, 0);
+      // ⚠️ calcularDiasYSemanas / calcularTotal esperan la fecha original.
+      // Como ahora r.fecha_recepcion es un string "YYYY-MM-DDTHH:mm:ss"
+      // (ISO sin zona), sigue funcionando correctamente.
       const { dias, semanas } = calcularDiasYSemanas(r.fecha_recepcion);
       const { total, multiplicador } = calcularTotal(base, r.fecha_recepcion);
       const zonaEfectiva = calcularZonaEfectiva(r.zona, dias);
@@ -76,7 +91,7 @@ const listarRecepcionesActivas = async () => {
       recepciones.push({
         id_recepcion: r.id_recepcion,
         codigo_recepcion: r.codigo_recepcion,
-        fecha_recepcion: r.fecha_recepcion,
+        fecha_recepcion: r.fecha_recepcion, // string "2026-10-05T14:39:27"
         zona: r.zona,
         zonaEfectiva,
         dias,

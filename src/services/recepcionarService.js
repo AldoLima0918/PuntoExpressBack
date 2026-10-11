@@ -9,7 +9,16 @@ const crearRecepcion = async (data) => {
   try {
     await client.query("BEGIN");
 
-    const { codigo_recepcion, zona, dejo, recoge, items } = data;
+    const {
+      codigo_recepcion,
+      zona,
+      dejo,
+      recoge,
+      items,
+      pago_inicial,
+      id_usuario,
+      id_caja_usuario,
+    } = data;
 
     // 1. Insertar la recepción
     const recepcionQuery = `
@@ -28,20 +37,31 @@ const crearRecepcion = async (data) => {
     const idDejo = await upsertPersona(client, dejo);
     const idRecoge = await upsertPersona(client, recoge);
 
-    // ✅ VALIDACIÓN: la persona que deja NO puede ser la que recoge
+    // ⚠️ Ya NO validamos que sean diferentes personas.
+    //    Se permite que deja === recoge.
+
+    // 2.1 Insertar persona_recepcion
+    //     Si son la misma persona, insertamos 2 filas (tipo 'deja' y 'recoge')
+    //     con el mismo id_persona. El UNIQUE (id_recepcion, tipo) lo permite.
     if (idDejo === idRecoge) {
-      throw new Error(
-        "La persona que deja el producto no puede ser la misma que lo recoge."
+      // Misma persona: insertamos 2 filas con el mismo id_persona
+      await client.query(
+        `INSERT INTO persona_recepcion (id_recepcion, id_persona, tipo)
+         VALUES ($1, $2, 'deja'), ($1, $2, 'recoge')`,
+        [idRecepcion, idDejo]
+      );
+    } else {
+      await client.query(
+        `INSERT INTO persona_recepcion (id_recepcion, id_persona, tipo)
+         VALUES ($1, $2, 'deja'), ($1, $3, 'recoge')`,
+        [idRecepcion, idDejo, idRecoge]
       );
     }
 
-    await client.query(
-      `INSERT INTO persona_recepcion (id_recepcion, id_persona, tipo)
-       VALUES ($1, $2, 'deja'), ($1, $3, 'recoge')`,
-      [idRecepcion, idDejo, idRecoge]
-    );
+    // 3. Insertar items y calcular base total
+    let baseTotal = 0;
+    const itemsDetalle = [];
 
-    // 3. Insertar items
     for (const item of items) {
       const tamanoRes = await client.query(
         `SELECT id_tamano FROM tamano WHERE tamano = $1`,
@@ -73,12 +93,119 @@ const crearRecepcion = async (data) => {
         );
       }
 
-      await client.query(
+      const insertItem = await client.query(
         `INSERT INTO tamano_recepcion 
            (id_recepcion, id_tamano, precio_tamano, id_estante, descripcion)
-         VALUES ($1, $2, $3, $4, $5)`,
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id_tamano_recepcion`,
         [idRecepcion, idTamano, precio, idEstante, descripcion]
       );
+
+      baseTotal += precio;
+      itemsDetalle.push({
+        id_tamano_recepcion: insertItem.rows[0].id_tamano_recepcion,
+        precio_tamano: precio,
+        tamano: item.tamano,
+      });
+    }
+
+    baseTotal = Number(baseTotal.toFixed(2));
+
+    // 4. ✅ Registrar pago inicial (OPCIONAL)
+    let montoPagadoInicial = 0;
+    let metodoPagoInicial = null;
+    let idVentaInicial = null;
+
+    if (pago_inicial && Number(pago_inicial.monto) > 0) {
+      const monto = Number(Number(pago_inicial.monto).toFixed(2));
+      const metodo = pago_inicial.metodo_pago;
+
+      if (monto > baseTotal) {
+        throw new Error(
+          `El monto del pago inicial (${monto}) no puede ser mayor al total (${baseTotal}).`
+        );
+      }
+
+      // 4.1 Validar caja si es efectivo
+      let idCajaObjetivo = null;
+      if (metodo === "Efectivo") {
+        const cajaValida = await validarCajaAbiertaParaRecepcion(
+          client,
+          id_caja_usuario
+        );
+        if (!cajaValida.ok) {
+          throw new Error(cajaValida.message);
+        }
+        idCajaObjetivo = cajaValida.idCaja;
+      }
+
+      // 4.2 Crear la venta del pago inicial
+      const descripcionVenta = `Pago inicial recepción ${codigo_recepcion} (${itemsDetalle.length} paq)`;
+      const ventaRes = await client.query(
+        `INSERT INTO venta (id_usuario, descripcion, total, metodo_pago)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id_venta`,
+        [id_usuario, descripcionVenta, monto, metodo]
+      );
+      idVentaInicial = ventaRes.rows[0].id_venta;
+
+      // 4.3 Insertar detalle_venta (todos los items de la recepción)
+      for (const it of itemsDetalle) {
+        await client.query(
+          `INSERT INTO detalle_venta (id_venta, id_tamano_recepcion)
+           VALUES ($1, $2)`,
+          [idVentaInicial, it.id_tamano_recepcion]
+        );
+      }
+
+      // 4.4 Actualizar la recepción con el pago inicial
+      await client.query(
+        `UPDATE recepcion
+         SET monto_pagado_inicial = $1,
+             metodo_pago_inicial = $2,
+             id_venta_inicial = $3,
+             fecha_pago_inicial = TIMEZONE('America/La_Paz', NOW())
+         WHERE id_recepcion = $4`,
+        [monto, metodo, idVentaInicial, idRecepcion]
+      );
+
+      // 4.5 Afectar caja si es efectivo
+      if (metodo === "Efectivo" && idCajaObjetivo) {
+        const cajaRes = await client.query(
+          `SELECT id_caja, total FROM caja WHERE id_caja = $1 FOR UPDATE`,
+          [idCajaObjetivo]
+        );
+        if (cajaRes.rows.length === 0) {
+          throw new Error("La caja seleccionada no existe");
+        }
+        const idCaja = cajaRes.rows[0].id_caja;
+        const montoAnterior = Number(cajaRes.rows[0].total);
+        const montoNuevo = Number((montoAnterior + monto).toFixed(2));
+
+        await client.query(
+          `UPDATE caja SET total = $1 WHERE id_caja = $2`,
+          [montoNuevo, idCaja]
+        );
+
+        await client.query(
+          `INSERT INTO transaccion_caja
+             (id_caja, id_usuario, monto_nuevo, monto_anterior, monto,
+              tipo_movimiento, descripcion, id_venta)
+           VALUES ($1, $2, $3, $4, $5, 'ingreso', $6, $7)`,
+          [
+            idCaja,
+            id_usuario,
+            montoNuevo,
+            montoAnterior,
+            monto,
+            descripcionVenta,
+            idVentaInicial,
+          ]
+        );
+      }
+
+      montoPagadoInicial = monto;
+      metodoPagoInicial = metodo;
     }
 
     await client.query("COMMIT");
@@ -87,7 +214,14 @@ const crearRecepcion = async (data) => {
       success: true,
       id_recepcion: idRecepcion,
       codigo_recepcion,
-      message: "Recepción registrada exitosamente",
+      base_total: baseTotal,
+      monto_pagado_inicial: montoPagadoInicial,
+      metodo_pago_inicial: metodoPagoInicial,
+      id_venta_inicial: idVentaInicial,
+      saldo_pendiente: Number((baseTotal - montoPagadoInicial).toFixed(2)),
+      message: montoPagadoInicial > 0
+        ? "Recepción registrada con pago inicial"
+        : "Recepción registrada exitosamente",
     };
   } catch (error) {
     await client.query("ROLLBACK");
@@ -97,6 +231,42 @@ const crearRecepcion = async (data) => {
     client.release();
   }
 };
+
+// ============================================
+// VALIDAR CAJA ABIERTA (para pago inicial en efectivo)
+// ============================================
+async function validarCajaAbiertaParaRecepcion(client, idCajaUsuario) {
+  if (idCajaUsuario) {
+    const res = await client.query(
+      `SELECT id_caja, estado FROM caja WHERE id_caja = $1 FOR UPDATE`,
+      [idCajaUsuario]
+    );
+    if (res.rows.length === 0) {
+      return { ok: false, message: "La caja asignada no existe." };
+    }
+    const c = res.rows[0];
+    if (c.estado !== "abierta") {
+      return {
+        ok: false,
+        message:
+          "La caja está cerrada. Debes abrir la caja para registrar pagos iniciales en efectivo.",
+      };
+    }
+    return { ok: true, idCaja: c.id_caja };
+  }
+
+  const res = await client.query(
+    `SELECT id_caja FROM caja WHERE estado = 'abierta' ORDER BY id_caja DESC LIMIT 1 FOR UPDATE`
+  );
+  if (res.rows.length === 0) {
+    return {
+      ok: false,
+      message:
+        "No hay cajas abiertas. Debes abrir una caja para registrar pagos iniciales en efectivo.",
+    };
+  }
+  return { ok: true, idCaja: res.rows[0].id_caja };
+}
 
 // ============================================
 // UPSERT PERSONA
@@ -408,7 +578,9 @@ const siguienteCodigo = async () => {
 const listarRecepciones = async () => {
   try {
     const recepcionesRes = await query(
-      `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, zona, estado
+      `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, zona, estado,
+              monto_pagado_inicial, metodo_pago_inicial, id_venta_inicial,
+              fecha_pago_inicial
        FROM recepcion WHERE estado != 'eliminado'
        ORDER BY fecha_recepcion DESC`
     );
@@ -454,6 +626,9 @@ const listarRecepciones = async () => {
       const { total, multiplicador } = calcularTotal(base, r.fecha_recepcion);
       const zonaEfectiva = calcularZonaEfectiva(r.zona, dias);
 
+      const montoPagadoInicial = Number(r.monto_pagado_inicial ?? 0);
+      const saldoPendiente = Number(Math.max(0, total - montoPagadoInicial).toFixed(2));
+
       recepciones.push({
         id_recepcion: r.id_recepcion,
         codigo_recepcion: r.codigo_recepcion,
@@ -465,6 +640,11 @@ const listarRecepciones = async () => {
         multiplicador,
         base,
         total,
+        monto_pagado_inicial: montoPagadoInicial,
+        metodo_pago_inicial: r.metodo_pago_inicial,
+        id_venta_inicial: r.id_venta_inicial,
+        fecha_pago_inicial: r.fecha_pago_inicial,
+        saldo_pendiente: saldoPendiente,
         estado: r.estado,
         dejo,
         recoge,

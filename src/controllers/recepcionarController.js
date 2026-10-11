@@ -6,7 +6,15 @@ const recepcionarService = require("../services/recepcionarService");
 // ============================================
 const crearRecepcion = async (req, res) => {
   try {
-    const { codigo_recepcion, zona, dejo, recoge, items } = req.body;
+    const {
+      codigo_recepcion,
+      zona,
+      dejo,
+      recoge,
+      items,
+      // ✅ NUEVOS CAMPOS OPCIONALES
+      pago_inicial,      // { metodo_pago: "Efectivo" | "QR", monto: number } | null
+    } = req.body;
 
     if (!codigo_recepcion || !zona || !dejo || !recoge || !items) {
       return res.status(400).json({ success: false, message: "Faltan datos obligatorios" });
@@ -41,26 +49,8 @@ const crearRecepcion = async (req, res) => {
       });
     }
 
-    // ✅ VALIDACIÓN: no pueden ser la misma persona
-    const celDejo = String(dejo.celular).trim();
-    const celRecoge = String(recoge.celular).trim();
-    const carDejo = String(dejo.carnet ?? "").trim();
-    const carRecoge = String(recoge.carnet ?? "").trim();
-
-    if (celDejo && celRecoge && celDejo === celRecoge) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "La persona que deja el producto no puede ser la misma que lo recoge (mismo celular).",
-      });
-    }
-    if (carDejo && carRecoge && carDejo === carRecoge) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "La persona que deja el producto no puede ser la misma que lo recoge (mismo carnet).",
-      });
-    }
+    // ⚠️ NOTA: Ya NO validamos que sean diferentes personas.
+    //    Se permite que deja === recoge.
 
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
@@ -84,12 +74,50 @@ const crearRecepcion = async (req, res) => {
       }
     }
 
+    // ✅ Validar pago_inicial si viene
+    if (pago_inicial) {
+      if (
+        typeof pago_inicial.monto !== "number" ||
+        !Number.isFinite(pago_inicial.monto) ||
+        pago_inicial.monto < 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "El monto del pago inicial es inválido.",
+        });
+      }
+      if (pago_inicial.monto > 0) {
+        if (
+          pago_inicial.metodo_pago !== "Efectivo" &&
+          pago_inicial.metodo_pago !== "QR"
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: 'Método de pago inicial inválido. Debe ser "Efectivo" o "QR".',
+          });
+        }
+      }
+    }
+
+    const idUsuario = req.user?.id_usuario;
+    const idCajaUsuario = req.user?.id_caja ?? null;
+
+    if (!idUsuario) {
+      return res.status(401).json({
+        success: false,
+        message: "Usuario no autenticado",
+      });
+    }
+
     const result = await recepcionarService.crearRecepcion({
       codigo_recepcion,
       zona,
       dejo,
       recoge,
       items,
+      pago_inicial: pago_inicial ?? null,
+      id_usuario: idUsuario,
+      id_caja_usuario: idCajaUsuario,
     });
     res.status(201).json(result);
   } catch (error) {

@@ -108,7 +108,9 @@ const buscarRecepciones = async (q) => {
 // ============================================
 const obtenerRecepcionCompleta = async (idRecepcion) => {
   const cabRes = await query(
-    `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, zona, estado
+    `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, zona, estado,
+            monto_pagado_inicial, metodo_pago_inicial, id_venta_inicial,
+            fecha_pago_inicial
      FROM recepcion
      WHERE id_recepcion = $1 AND estado = 'pendiente'`,
     [idRecepcion]
@@ -167,6 +169,12 @@ const obtenerRecepcionCompleta = async (idRecepcion) => {
   const { total, multiplicador } = calcularTotal(base, cab.fecha_recepcion);
   const zonaEfectiva = calcularZonaEfectiva(cab.zona, dias);
 
+  // ✅ Pago inicial y saldo
+  const montoPagadoInicial = Number(cab.monto_pagado_inicial ?? 0);
+  const saldoPendiente = Number(
+    Math.max(0, total - montoPagadoInicial).toFixed(2)
+  );
+
   return {
     id_recepcion: cab.id_recepcion,
     codigo_recepcion: cab.codigo_recepcion,
@@ -178,6 +186,12 @@ const obtenerRecepcionCompleta = async (idRecepcion) => {
     multiplicador,
     base,
     total,
+    // ✅ NUEVOS CAMPOS
+    monto_pagado_inicial: montoPagadoInicial,
+    metodo_pago_inicial: cab.metodo_pago_inicial ?? null,
+    id_venta_inicial: cab.id_venta_inicial ?? null,
+    fecha_pago_inicial: cab.fecha_pago_inicial ?? null,
+    saldo_pendiente: saldoPendiente,
     estado: cab.estado,
     dejo,
     recoge,
@@ -204,6 +218,8 @@ const previewEntrega = async (idRecepcion) => {
       dias: detalle.dias,
       multiplicador: detalle.multiplicador,
       zonaEfectiva: detalle.zonaEfectiva,
+      monto_pagado_inicial: detalle.monto_pagado_inicial,
+      saldo_pendiente: detalle.saldo_pendiente,
     };
   } catch (error) {
     console.error("Error en previewEntrega:", error);
@@ -262,7 +278,8 @@ const estadoCajaUsuario = async (idUsuario, idCajaUsuario) => {
         tieneCaja: false,
         abierta: false,
         caja: null,
-        message: "No hay cajas abiertas. Debes abrir una caja para poder entregar en efectivo.",
+        message:
+          "No hay cajas abiertas. Debes abrir una caja para poder entregar en efectivo.",
       };
     }
 
@@ -350,7 +367,8 @@ const entregarMultiple = async (
     await client.query("BEGIN");
 
     const cabRes = await client.query(
-      `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, estado
+      `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, estado,
+              monto_pagado_inicial, metodo_pago_inicial
        FROM recepcion
        WHERE id_recepcion = ANY($1::int[])
        FOR UPDATE`,
@@ -380,7 +398,11 @@ const entregarMultiple = async (
       throw new Error("Las recepciones seleccionadas no tienen items");
     }
 
-    let totalGeneral = 0;
+    // ✅ Calcular totales con pago inicial
+    let totalGeneral = 0;         // total recalculado (con multiplicador)
+    let totalPagadoInicial = 0;   // suma de pagos iniciales
+    let saldoGeneral = 0;         // total a cobrar ahora
+
     const detallesPorRecepcion = [];
 
     for (const cab of cabRes.rows) {
@@ -395,7 +417,16 @@ const entregarMultiple = async (
         baseRecepcion,
         cab.fecha_recepcion
       );
+
+      const montoPagadoInicial = Number(cab.monto_pagado_inicial ?? 0);
+      const saldoRecepcion = Number(
+        Math.max(0, total - montoPagadoInicial).toFixed(2)
+      );
+
       totalGeneral += total;
+      totalPagadoInicial += montoPagadoInicial;
+      saldoGeneral += saldoRecepcion;
+
       detallesPorRecepcion.push({
         id_recepcion: cab.id_recepcion,
         codigo_recepcion: cab.codigo_recepcion,
@@ -403,105 +434,132 @@ const entregarMultiple = async (
         total,
         semanas,
         multiplicador,
+        monto_pagado_inicial: montoPagadoInicial,
+        metodo_pago_inicial: cab.metodo_pago_inicial ?? null,
+        saldo_pendiente: saldoRecepcion,
         items: itemsRecepcion,
       });
     }
+
     totalGeneral = Number(totalGeneral.toFixed(2));
+    totalPagadoInicial = Number(totalPagadoInicial.toFixed(2));
+    saldoGeneral = Number(saldoGeneral.toFixed(2));
 
     const esEfectivo = metodoPago !== "QR";
 
-    const cajaValida = await validarCajaAbierta(client, idCajaUsuario, esEfectivo);
+    // ✅ Si el saldo es 0, no necesitamos caja (no se cobra nada)
+    const cajaValida = await validarCajaAbierta(
+      client,
+      idCajaUsuario,
+      esEfectivo && saldoGeneral > 0
+    );
     if (!cajaValida.ok) {
       throw new Error(cajaValida.message);
     }
     const idCajaObjetivo = cajaValida.idCaja;
 
     // ── Construir descripción detallada por recepción ──
-    // Ej: "PX-1006 (0 sem · x1 · 2 paq) | PX-401357 (0 sem · x1 · 1 paq)"
+    // Ej: "PX-1006 (0 sem · x1 · 2 paq · pagó 5.00 · saldo 0.00)"
     const descripcionDetalle = detallesPorRecepcion
-      .map(
-        (d) =>
-          `${d.codigo_recepcion} (${d.semanas} sem · x${d.multiplicador} · ${d.items.length} paq)`
-      )
+      .map((d) => {
+        const partes = [
+          `${d.codigo_recepcion}`,
+          `${d.semanas} sem`,
+          `x${d.multiplicador}`,
+          `${d.items.length} paq`,
+        ];
+        if (d.monto_pagado_inicial > 0) {
+          partes.push(`pagó ${d.monto_pagado_inicial.toFixed(2)}`);
+        }
+        partes.push(`saldo ${d.saldo_pendiente.toFixed(2)}`);
+        return `(${partes.join(" · ")})`;
+      })
       .join(" | ");
 
-    // Descripción para la VENTA
     const descripcionVenta =
       detallesPorRecepcion.length > 1
         ? `Entrega múltiple: ${descripcionDetalle}`
         : `Entrega ${descripcionDetalle}`;
 
-    // Descripción para la TRANSACCIÓN DE CAJA (mismo formato)
-    const descripcionCaja = descripcionVenta;
+    // ✅ Solo crear venta si hay saldo > 0
+    let idVenta = null;
 
-    const ventaRes = await client.query(
-      `INSERT INTO venta (id_usuario, descripcion, total, metodo_pago)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id_venta`,
-      [
-        idUsuario,
-        descripcionVenta,
-        totalGeneral,
-        esEfectivo ? "Efectivo" : "QR",
-      ]
-    );
-    const idVenta = ventaRes.rows[0].id_venta;
-
-    for (const it of itemsRes.rows) {
-      await client.query(
-        `INSERT INTO detalle_venta (id_venta, id_tamano_recepcion)
-         VALUES ($1, $2)`,
-        [idVenta, it.id_tamano_recepcion]
+    if (saldoGeneral > 0) {
+      const ventaRes = await client.query(
+        `INSERT INTO venta (id_usuario, descripcion, total, metodo_pago)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id_venta`,
+        [
+          idUsuario,
+          descripcionVenta,
+          saldoGeneral, // ✅ Se cobra el SALDO, no el total
+          esEfectivo ? "Efectivo" : "QR",
+        ]
       );
+      idVenta = ventaRes.rows[0].id_venta;
+
+      // Insertar detalle_venta (todos los items de todas las recepciones)
+      for (const it of itemsRes.rows) {
+        await client.query(
+          `INSERT INTO detalle_venta (id_venta, id_tamano_recepcion)
+           VALUES ($1, $2)`,
+          [idVenta, it.id_tamano_recepcion]
+        );
+      }
+
+      // ✅ Afectar caja solo si es efectivo Y hay saldo
+      if (esEfectivo && idCajaObjetivo) {
+        const cajaRes = await client.query(
+          `SELECT id_caja, total FROM caja WHERE id_caja = $1 FOR UPDATE`,
+          [idCajaObjetivo]
+        );
+
+        if (cajaRes.rows.length === 0) {
+          throw new Error("La caja seleccionada no existe");
+        }
+
+        const idCaja = cajaRes.rows[0].id_caja;
+        const montoAnterior = Number(cajaRes.rows[0].total);
+        const montoNuevo = Number((montoAnterior + saldoGeneral).toFixed(2));
+
+        await client.query(
+          `UPDATE caja SET total = $1, estado = 'abierta' WHERE id_caja = $2`,
+          [montoNuevo, idCaja]
+        );
+
+        await client.query(
+          `INSERT INTO transaccion_caja
+             (id_caja, id_usuario, monto_nuevo, monto_anterior, monto,
+              tipo_movimiento, descripcion, id_venta)
+           VALUES ($1, $2, $3, $4, $5, 'ingreso', $6, $7)`,
+          [
+            idCaja,
+            idUsuario,
+            montoNuevo,
+            montoAnterior,
+            saldoGeneral,
+            descripcionVenta,
+            idVenta,
+          ]
+        );
+      }
     }
 
+    // ✅ Marcar recepciones como entregadas
     await client.query(
       `UPDATE recepcion SET estado = 'entregado'
        WHERE id_recepcion = ANY($1::int[])`,
       [idsUnicos]
     );
 
-    if (esEfectivo && idCajaObjetivo) {
-      const cajaRes = await client.query(
-        `SELECT id_caja, total FROM caja WHERE id_caja = $1 FOR UPDATE`,
-        [idCajaObjetivo]
-      );
-
-      if (cajaRes.rows.length === 0) {
-        throw new Error("La caja seleccionada no existe");
-      }
-
-      const idCaja = cajaRes.rows[0].id_caja;
-      const montoAnterior = Number(cajaRes.rows[0].total);
-      const montoNuevo = Number((montoAnterior + totalGeneral).toFixed(2));
-
-      await client.query(
-        `UPDATE caja SET total = $1, estado = 'abierta' WHERE id_caja = $2`,
-        [montoNuevo, idCaja]
-      );
-
-      await client.query(
-        `INSERT INTO transaccion_caja
-           (id_caja, id_usuario, monto_nuevo, monto_anterior, monto, tipo_movimiento, descripcion, id_venta)
-         VALUES ($1, $2, $3, $4, $5, 'ingreso', $6, $7)`,
-        [
-          idCaja,
-          idUsuario,
-          montoNuevo,
-          montoAnterior,
-          totalGeneral,
-          descripcionCaja,
-          idVenta,
-        ]
-      );
-    }
-
     await client.query("COMMIT");
 
     return {
       success: true,
       id_venta: idVenta,
-      total: totalGeneral,
+      total: totalGeneral,               // total recalculado
+      total_pagado_inicial: totalPagadoInicial,
+      saldo_cobrado: saldoGeneral,       // ✅ lo que realmente se cobró
       recepciones_entregadas: idsUnicos.length,
       codigos: detallesPorRecepcion.map((d) => d.codigo_recepcion),
       detalles: detallesPorRecepcion.map((d) => ({
@@ -510,11 +568,16 @@ const entregarMultiple = async (
         total: d.total,
         semanas: d.semanas,
         multiplicador: d.multiplicador,
+        monto_pagado_inicial: d.monto_pagado_inicial,
+        saldo_pendiente: d.saldo_pendiente,
       })),
-      metodo_pago: esEfectivo ? "Efectivo" : "QR",
-      message: esEfectivo
-        ? `Se entregaron ${idsUnicos.length} recepción(es) (afecta caja)`
-        : `Se entregaron ${idsUnicos.length} recepción(es) (no afecta caja)`,
+      metodo_pago: saldoGeneral > 0 ? (esEfectivo ? "Efectivo" : "QR") : null,
+      message:
+        saldoGeneral > 0
+          ? esEfectivo
+            ? `Se entregaron ${idsUnicos.length} recepción(es). Cobrado ${saldoGeneral.toFixed(2)} en efectivo (afecta caja).`
+            : `Se entregaron ${idsUnicos.length} recepción(es). Cobrado ${saldoGeneral.toFixed(2)} por QR (no afecta caja).`
+          : `Se entregaron ${idsUnicos.length} recepción(es). Ya estaban pagadas, no se cobró nada.`,
     };
   } catch (error) {
     await client.query("ROLLBACK");

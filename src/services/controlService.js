@@ -14,17 +14,16 @@ const listarRecepcionesActivas = async () => {
     // ✅ FIX ZONA HORARIA:
     // to_char devuelve la fecha como string "YYYY-MM-DDTHH:mm:ss" SIN zona.
     // Así el frontend NO la convierte a UTC y se imprime la hora real.
-    //
-    // ⚠️ Si tu columna es `timestamptz` (con zona) y guarda en UTC,
-    // cambia la línea del to_char por:
-    //   to_char(fecha_recepcion AT TIME ZONE 'America/La_Paz',
-    //           'YYYY-MM-DD"T"HH24:MI:SS') AS fecha_recepcion,
     const cabeceras = await query(
       `SELECT id_recepcion,
               codigo_recepcion,
               to_char(fecha_recepcion, 'YYYY-MM-DD"T"HH24:MI:SS') AS fecha_recepcion,
               zona,
-              estado
+              estado,
+              monto_pagado_inicial,
+              metodo_pago_inicial,
+              id_venta_inicial,
+              fecha_pago_inicial
        FROM recepcion
        WHERE estado = 'pendiente'
        ORDER BY fecha_recepcion ASC`
@@ -81,17 +80,20 @@ const listarRecepcionesActivas = async () => {
       }));
 
       const base = items.reduce((s, it) => s + it.precio_tamano, 0);
-      // ⚠️ calcularDiasYSemanas / calcularTotal esperan la fecha original.
-      // Como ahora r.fecha_recepcion es un string "YYYY-MM-DDTHH:mm:ss"
-      // (ISO sin zona), sigue funcionando correctamente.
       const { dias, semanas } = calcularDiasYSemanas(r.fecha_recepcion);
       const { total, multiplicador } = calcularTotal(base, r.fecha_recepcion);
       const zonaEfectiva = calcularZonaEfectiva(r.zona, dias);
 
+      // ✅ Pago inicial y saldo pendiente
+      const montoPagadoInicial = Number(r.monto_pagado_inicial ?? 0);
+      const saldoPendiente = Number(
+        Math.max(0, total - montoPagadoInicial).toFixed(2)
+      );
+
       recepciones.push({
         id_recepcion: r.id_recepcion,
         codigo_recepcion: r.codigo_recepcion,
-        fecha_recepcion: r.fecha_recepcion, // string "2026-10-05T14:39:27"
+        fecha_recepcion: r.fecha_recepcion,
         zona: r.zona,
         zonaEfectiva,
         dias,
@@ -99,6 +101,12 @@ const listarRecepcionesActivas = async () => {
         multiplicador,
         base,
         total,
+        // ✅ NUEVOS CAMPOS
+        monto_pagado_inicial: montoPagadoInicial,
+        metodo_pago_inicial: r.metodo_pago_inicial ?? null,
+        id_venta_inicial: r.id_venta_inicial ?? null,
+        fecha_pago_inicial: r.fecha_pago_inicial ?? null,
+        saldo_pendiente: saldoPendiente,
         estado: r.estado,
         dejo,
         recoge,

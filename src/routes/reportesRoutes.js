@@ -13,4 +13,7 @@ router.get("/recepciones-activas", reportesController.recepcionesActivas);
 // Ventas agrupadas por mes
 router.get("/tendencia-mensual", reportesController.tendenciaMensual);
 
+// Top de personas que más paquetes dejaron (filtro opcional desde/hasta)
+router.get("/top-dejantes", reportesController.topDejantes);
+
 module.exports = router;

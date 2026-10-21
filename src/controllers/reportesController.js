@@ -33,7 +33,25 @@ const tendenciaMensual = async (_req, res) => {
   }
 };
 
+// ============================================
+// TOP PERSONAS QUE MÁS DEJARON PAQUETES
+// ============================================
+const topDejantes = async (req, res) => {
+  try {
+    const { desde, hasta } = req.query;
+    const result = await reportesService.obtenerTopDejantes({ desde, hasta });
+    res.json(result);
+  } catch (error) {
+    console.error("Error en topDejantes:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error interno del servidor",
+    });
+  }
+};
+
 module.exports = {
   recepcionesActivas,
   tendenciaMensual,
+  topDejantes,
 };

@@ -158,11 +158,15 @@ const obtenerTendenciaMensual = async () => {
 };
 
 // ============================================
-// TOP PERSONAS QUE MÁS DEJARON PAQUETES
+// TOP PERSONAS QUE MÁS DEJARON PAQUETES (por celular)
 // ============================================
 const obtenerTopDejantes = async ({ desde, hasta } = {}) => {
   try {
-    const condiciones = ["pr.tipo = 'deja'", "r.estado <> 'eliminado'"];
+    const condiciones = [
+      "pr.tipo = 'deja'",
+      "r.estado <> 'eliminado'",
+      "p.celular IS NOT NULL",
+    ];
     const params = [];
 
     if (desde) {
@@ -180,33 +184,29 @@ const obtenerTopDejantes = async ({ desde, hasta } = {}) => {
 
     const result = await query(
       `SELECT
-         p.id_persona,
-         p.carnet,
-         p.nombres,
-         p.apellidos,
          p.celular,
+         MIN(p.carnet)                                 AS carnet,
+         MIN(p.nombres)                                AS nombres,
+         MIN(p.apellidos)                              AS apellidos,
          COUNT(*)::int                                 AS paquetes,
-         COUNT(DISTINCT DATE_TRUNC('month', r.fecha_recepcion))::int AS meses_activos,
          MIN(r.fecha_recepcion)                        AS primera_vez,
          MAX(r.fecha_recepcion)                        AS ultima_vez
        FROM persona_recepcion pr
        INNER JOIN persona p   ON pr.id_persona = p.id_persona
        INNER JOIN recepcion r ON pr.id_recepcion = r.id_recepcion
        ${where}
-       GROUP BY p.id_persona, p.carnet, p.nombres, p.apellidos, p.celular
-       ORDER BY paquetes DESC, p.apellidos ASC
+       GROUP BY p.celular
+       ORDER BY paquetes DESC, MIN(p.apellidos) ASC
        LIMIT 50`,
       params
     );
 
     const top = result.rows.map((row) => ({
-      id_persona: row.id_persona,
+      celular: row.celular,
       carnet: row.carnet,
       nombres: row.nombres,
       apellidos: row.apellidos,
-      celular: row.celular,
       paquetes: row.paquetes,
-      meses_activos: row.meses_activos,
       primera_vez: row.primera_vez,
       ultima_vez: row.ultima_vez,
     }));

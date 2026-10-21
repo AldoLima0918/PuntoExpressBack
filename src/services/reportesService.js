@@ -166,6 +166,7 @@ const obtenerTopDejantes = async ({ desde, hasta } = {}) => {
       "pr.tipo = 'deja'",
       "r.estado <> 'eliminado'",
       "p.celular IS NOT NULL",
+      "TRIM(p.celular) <> ''",
     ];
     const params = [];
 
@@ -185,7 +186,7 @@ const obtenerTopDejantes = async ({ desde, hasta } = {}) => {
     const result = await query(
       `SELECT
          p.celular,
-         MIN(p.carnet)                                 AS carnet,
+         MIN(NULLIF(TRIM(p.carnet), ''))               AS carnet,
          MIN(p.nombres)                                AS nombres,
          MIN(p.apellidos)                              AS apellidos,
          COUNT(*)::int                                 AS paquetes,
@@ -203,7 +204,8 @@ const obtenerTopDejantes = async ({ desde, hasta } = {}) => {
 
     const top = result.rows.map((row) => ({
       celular: row.celular,
-      carnet: row.carnet,
+      // 👇 si no hay carnet, se devuelve null (no string vacío)
+      carnet: row.carnet ?? null,
       nombres: row.nombres,
       apellidos: row.apellidos,
       paquetes: row.paquetes,

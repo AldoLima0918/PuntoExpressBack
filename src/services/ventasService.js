@@ -13,13 +13,28 @@ const listarVentas = async ({
   busqueda,
 }) => {
   try {
-    const fechaDesde = desde || "1900-01-01";
-    const fechaHasta = hasta || "2999-12-31";
+    const textoBusqueda =
+      typeof busqueda === "string" && busqueda.trim() !== ""
+        ? busqueda.trim()
+        : null;
 
-    const condiciones = [
-      `v.fecha_venta::date BETWEEN $1::date AND $2::date`,
-    ];
-    const params = [fechaDesde, fechaHasta];
+    const condiciones = [];
+    const params = [];
+
+    // ------------------------------------------------
+    // FILTRO DE FECHAS
+    // Solo se aplica si NO hay búsqueda de persona.
+    // Si hay búsqueda, se ignora el rango y se busca
+    // en TODO el historial.
+    // ------------------------------------------------
+    if (!textoBusqueda) {
+      const fechaDesde = desde || "1900-01-01";
+      const fechaHasta = hasta || "2999-12-31";
+      params.push(fechaDesde, fechaHasta);
+      condiciones.push(
+        `v.fecha_venta::date BETWEEN $${params.length - 1}::date AND $${params.length}::date`
+      );
+    }
 
     // Filtro por usuario (ayudante solo ve las suyas)
     if (!esAdmin && idUsuario) {
@@ -33,11 +48,13 @@ const listarVentas = async ({
       condiciones.push(`tc.id_caja = $${params.length}`);
     }
 
-    // Filtro por búsqueda de cliente (nombre, apellido, carnet o celular)
-    // Se usa EXISTS para no duplicar filas cuando una venta tiene
-    // múltiples recepciones asociadas.
-    if (busqueda && String(busqueda).trim() !== "") {
-      params.push(`%${String(busqueda).trim()}%`);
+    // ------------------------------------------------
+    // FILTRO POR BÚSQUEDA DE PERSONA
+    // Nombre, apellido, carnet o celular del cliente
+    // que RECOGE. Usa EXISTS para no duplicar filas.
+    // ------------------------------------------------
+    if (textoBusqueda) {
+      params.push(`%${textoBusqueda}%`);
       const idx = params.length;
       condiciones.push(`EXISTS (
         SELECT 1
@@ -60,6 +77,9 @@ const listarVentas = async ({
       )`);
     }
 
+    const whereClause =
+      condiciones.length > 0 ? `WHERE ${condiciones.join(" AND ")}` : "";
+
     const ventasRes = await query(
       `SELECT
           v.id_venta,
@@ -78,7 +98,7 @@ const listarVentas = async ({
        INNER JOIN persona p ON u.id_persona = p.id_persona
        LEFT JOIN transaccion_caja tc ON tc.id_venta = v.id_venta
        LEFT JOIN caja c ON tc.id_caja = c.id_caja
-       WHERE ${condiciones.join(" AND ")}
+       ${whereClause}
        ORDER BY v.fecha_venta DESC, v.id_venta DESC`,
       params
     );
@@ -139,9 +159,7 @@ const listarVentas = async ({
         usuario_apellido: v.usuario_apellido,
         id_caja: v.id_caja ?? null,
         nombre_caja: v.nombre_caja ?? null,
-        // Array con todas las recepciones asociadas
         codigos_recepcion: codigosRecepcion,
-        // Compatibilidad: primera recepción (por si algo lo usa)
         codigo_recepcion: codigosRecepcion[0] ?? null,
         cliente_nombre: clienteNombre,
         cliente_apellido: clienteApellido,

@@ -8,7 +8,9 @@ const listar = async (req, res) => {
   try {
     const { desde, hasta, id_caja, busqueda } = req.query;
 
-    if (!desde || !hasta) {
+    // desde/hasta siguen siendo obligatorios para el caso normal,
+    // pero si hay búsqueda el service los ignora.
+    if (!busqueda && (!desde || !hasta)) {
       return res.status(400).json({
         success: false,
         message: "Los parámetros 'desde' y 'hasta' son obligatorios",
@@ -19,10 +21,8 @@ const listar = async (req, res) => {
     const rol = req.user?.rol;
     const esAdmin = rol === "administrador" || rol === "admin";
 
-    // El filtro por caja solo aplica a admin
     const idCaja = esAdmin && id_caja ? Number(id_caja) : null;
 
-    // Texto de búsqueda (nombre, carnet o celular del cliente)
     const textoBusqueda =
       typeof busqueda === "string" && busqueda.trim() !== ""
         ? busqueda.trim()

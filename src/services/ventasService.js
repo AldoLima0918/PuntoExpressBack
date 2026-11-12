@@ -4,7 +4,14 @@ const { query } = require("../../db");
 // ============================================
 // LISTAR VENTAS POR RANGO DE FECHAS + FILTROS
 // ============================================
-const listarVentas = async ({ desde, hasta, idUsuario, esAdmin, idCaja }) => {
+const listarVentas = async ({
+  desde,
+  hasta,
+  idUsuario,
+  esAdmin,
+  idCaja,
+  busqueda,
+}) => {
   try {
     const fechaDesde = desde || "1900-01-01";
     const fechaHasta = hasta || "2999-12-31";
@@ -24,6 +31,33 @@ const listarVentas = async ({ desde, hasta, idUsuario, esAdmin, idCaja }) => {
     if (esAdmin && idCaja) {
       params.push(idCaja);
       condiciones.push(`tc.id_caja = $${params.length}`);
+    }
+
+    // Filtro por búsqueda de cliente (nombre, apellido, carnet o celular)
+    // Se usa EXISTS para no duplicar filas cuando una venta tiene
+    // múltiples recepciones asociadas.
+    if (busqueda && String(busqueda).trim() !== "") {
+      params.push(`%${String(busqueda).trim()}%`);
+      const idx = params.length;
+      condiciones.push(`EXISTS (
+        SELECT 1
+        FROM detalle_venta dv_b
+        INNER JOIN tamano_recepcion tr_b
+          ON dv_b.id_tamano_recepcion = tr_b.id_tamano_recepcion
+        INNER JOIN persona_recepcion pr_b
+          ON tr_b.id_recepcion = pr_b.id_recepcion
+        INNER JOIN persona p_b
+          ON pr_b.id_persona = p_b.id_persona
+        WHERE dv_b.id_venta = v.id_venta
+          AND pr_b.tipo = 'recoge'
+          AND (
+            p_b.nombres   ILIKE $${idx}
+            OR p_b.apellidos ILIKE $${idx}
+            OR p_b.carnet    ILIKE $${idx}
+            OR p_b.celular   ILIKE $${idx}
+            OR (p_b.nombres || ' ' || p_b.apellidos) ILIKE $${idx}
+          )
+      )`);
     }
 
     const ventasRes = await query(
@@ -71,15 +105,15 @@ const listarVentas = async ({ desde, hasta, idUsuario, esAdmin, idCaja }) => {
         (row) => row.codigo_recepcion
       );
 
-      // Si la venta está asociada a una sola recepción (o varias),
-      // tomamos el cliente de la PRIMERA recepción (todas son de la misma persona
-      // cuando se usa "entregar seleccionadas").
+      // Cliente (persona que recoge) de la PRIMERA recepción
       let clienteNombre = null;
       let clienteApellido = null;
+      let clienteCarnet = null;
+      let clienteCelular = null;
       if (detalleRes.rows.length > 0) {
         const idRecepcion = detalleRes.rows[0].id_recepcion;
         const clienteRes = await query(
-          `SELECT p.nombres, p.apellidos
+          `SELECT p.nombres, p.apellidos, p.carnet, p.celular
            FROM persona_recepcion pr
            INNER JOIN persona p ON pr.id_persona = p.id_persona
            WHERE pr.id_recepcion = $1 AND pr.tipo = 'recoge'
@@ -89,6 +123,8 @@ const listarVentas = async ({ desde, hasta, idUsuario, esAdmin, idCaja }) => {
         if (clienteRes.rows.length > 0) {
           clienteNombre = clienteRes.rows[0].nombres;
           clienteApellido = clienteRes.rows[0].apellidos;
+          clienteCarnet = clienteRes.rows[0].carnet;
+          clienteCelular = clienteRes.rows[0].celular;
         }
       }
 
@@ -109,6 +145,8 @@ const listarVentas = async ({ desde, hasta, idUsuario, esAdmin, idCaja }) => {
         codigo_recepcion: codigosRecepcion[0] ?? null,
         cliente_nombre: clienteNombre,
         cliente_apellido: clienteApellido,
+        cliente_carnet: clienteCarnet,
+        cliente_celular: clienteCelular,
       });
     }
 

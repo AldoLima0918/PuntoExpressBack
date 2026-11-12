@@ -4,7 +4,7 @@ const router = express.Router();
 const ventasController = require("../controllers/ventasController");
 const { authenticate } = require("../middleware/loginmiddleware");
 
-// Listar ventas con filtro de fechas y caja
+// Listar ventas con filtro de fechas, caja y búsqueda
 router.get("/", authenticate, ventasController.listar);
 
 // Listar cajas (para el filtro del admin)

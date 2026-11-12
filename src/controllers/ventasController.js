@@ -6,7 +6,7 @@ const ventasService = require("../services/ventasService");
 // ============================================
 const listar = async (req, res) => {
   try {
-    const { desde, hasta, id_caja } = req.query;
+    const { desde, hasta, id_caja, busqueda } = req.query;
 
     if (!desde || !hasta) {
       return res.status(400).json({
@@ -22,12 +22,19 @@ const listar = async (req, res) => {
     // El filtro por caja solo aplica a admin
     const idCaja = esAdmin && id_caja ? Number(id_caja) : null;
 
+    // Texto de búsqueda (nombre, carnet o celular del cliente)
+    const textoBusqueda =
+      typeof busqueda === "string" && busqueda.trim() !== ""
+        ? busqueda.trim()
+        : null;
+
     const result = await ventasService.listarVentas({
       desde,
       hasta,
       idUsuario,
       esAdmin,
       idCaja,
+      busqueda: textoBusqueda,
     });
 
     res.json(result);

@@ -1,6 +1,5 @@
 // src/services/recepcionarService.js
 const { query, pool } = require("../../db");
-
 // ============================================
 // CREAR RECEPCIÓN (TRANSACCIÓN)
 // ============================================
@@ -8,7 +7,6 @@ const crearRecepcion = async (data) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-
     const {
       codigo_recepcion,
       zona,
@@ -18,28 +16,32 @@ const crearRecepcion = async (data) => {
       pago_inicial,
       id_usuario,
       id_caja_usuario,
+      tipo_operacion = "local", id_alianza = null,
     } = data;
-
     // 1. Insertar la recepción
+    let alianza = null;
+    if (tipo_operacion !== 'local') {
+      const a = await client.query('SELECT id_alianza, nombre, ubicacion, foto, foto_tipo FROM alianza WHERE id_alianza = $1 FOR KEY SHARE', [id_alianza]);
+      if (!a.rows.length) throw Object.assign(new Error('Alianza no encontrada'), { status: 400 });
+      alianza = a.rows[0];
+    }
+    const estadoTraslado = tipo_operacion === 'salida' ? 'pendiente_envio' : tipo_operacion === 'entrada' ? 'recibido' : null;
     const recepcionQuery = `
-      INSERT INTO recepcion (codigo_recepcion, zona, estado)
-      VALUES ($1, $2, 'pendiente')
+      INSERT INTO recepcion (codigo_recepcion, zona, estado, tipo_operacion, id_alianza, estado_traslado, alianza_nombre, alianza_ubicacion)
+      VALUES ($1, $2, 'pendiente', $3, $4, $5, $6, $7)
       RETURNING id_recepcion
     `;
     const zonaTexto = Number(zona) === 1 ? "Zona 1" : "Zona 2";
     const recepcionResult = await client.query(recepcionQuery, [
       codigo_recepcion,
-      zonaTexto,
+      zonaTexto, tipo_operacion, id_alianza, estadoTraslado, alianza?.nombre ?? null, alianza?.ubicacion ?? null,
     ]);
     const idRecepcion = recepcionResult.rows[0].id_recepcion;
-
     // 2. Upsert de personas
     const idDejo = await upsertPersona(client, dejo);
     const idRecoge = await upsertPersona(client, recoge);
-
     // ⚠️ Ya NO validamos que sean diferentes personas.
     //    Se permite que deja === recoge.
-
     // 2.1 Insertar persona_recepcion
     //     Si son la misma persona, insertamos 2 filas (tipo 'deja' y 'recoge')
     //     con el mismo id_persona. El UNIQUE (id_recepcion, tipo) lo permite.
@@ -57,11 +59,9 @@ const crearRecepcion = async (data) => {
         [idRecepcion, idDejo, idRecoge]
       );
     }
-
     // 3. Insertar items y calcular base total
     let baseTotal = 0;
     const itemsDetalle = [];
-
     for (const item of items) {
       const tamanoRes = await client.query(
         `SELECT id_tamano FROM tamano WHERE tamano = $1`,
@@ -71,36 +71,34 @@ const crearRecepcion = async (data) => {
         throw new Error(`Tamaño no encontrado: ${item.tamano}`);
       }
       const idTamano = tamanoRes.rows[0].id_tamano;
-
-      const estanteRes = await client.query(
-        `SELECT id_estante FROM estante WHERE estante = $1`,
-        [item.estante]
-      );
-      if (estanteRes.rows.length === 0) {
-        throw new Error(`Estante no encontrado: ${item.estante}`);
+      let idEstante = null;
+      if (tipo_operacion !== 'salida') {
+        const estanteRes = await client.query(
+          `SELECT id_estante FROM estante WHERE estante = $1`,
+          [item.estante]
+        );
+        if (estanteRes.rows.length === 0) {
+          throw new Error(`Estante no encontrado: ${item.estante}`);
+        }
+        idEstante = estanteRes.rows[0].id_estante;
       }
-      const idEstante = estanteRes.rows[0].id_estante;
-
-      const precio = Number(item.precio);
+      const precio = tipo_operacion === 'salida' ? 0 : Number(item.precio);
       if (!Number.isFinite(precio)) {
         throw new Error(`Precio inválido en el paquete: ${item.precio}`);
       }
-
       const descripcion = (item.descripcion ?? "").trim();
       if (!descripcion) {
         throw new Error(
           `La descripción del paquete (tamaño ${item.tamano}) es obligatoria.`
         );
       }
-
       const insertItem = await client.query(
-        `INSERT INTO tamano_recepcion 
+        `INSERT INTO tamano_recepcion
            (id_recepcion, id_tamano, precio_tamano, id_estante, descripcion)
          VALUES ($1, $2, $3, $4, $5)
          RETURNING id_tamano_recepcion`,
         [idRecepcion, idTamano, precio, idEstante, descripcion]
       );
-
       baseTotal += precio;
       itemsDetalle.push({
         id_tamano_recepcion: insertItem.rows[0].id_tamano_recepcion,
@@ -108,24 +106,22 @@ const crearRecepcion = async (data) => {
         tamano: item.tamano,
       });
     }
-
     baseTotal = Number(baseTotal.toFixed(2));
-
     // 4. ✅ Registrar pago inicial (OPCIONAL)
     let montoPagadoInicial = 0;
     let metodoPagoInicial = null;
     let idVentaInicial = null;
-
-    if (pago_inicial && Number(pago_inicial.monto) > 0) {
+    if (tipo_operacion === 'salida' && pago_inicial && Number(pago_inicial.monto) > 0) {
+      throw new Error('Los envíos a alianzas no admiten pagos iniciales de almacenaje.');
+    }
+    if (tipo_operacion !== 'salida' && pago_inicial && Number(pago_inicial.monto) > 0) {
       const monto = Number(Number(pago_inicial.monto).toFixed(2));
       const metodo = pago_inicial.metodo_pago;
-
       if (monto > baseTotal) {
         throw new Error(
           `El monto del pago inicial (${monto}) no puede ser mayor al total (${baseTotal}).`
         );
       }
-
       // 4.1 Validar caja si es efectivo
       let idCajaObjetivo = null;
       if (metodo === "Efectivo") {
@@ -138,7 +134,6 @@ const crearRecepcion = async (data) => {
         }
         idCajaObjetivo = cajaValida.idCaja;
       }
-
       // 4.2 Crear la venta del pago inicial
       const descripcionVenta = `Pago inicial recepción ${codigo_recepcion} (${itemsDetalle.length} paq)`;
       const ventaRes = await client.query(
@@ -148,7 +143,6 @@ const crearRecepcion = async (data) => {
         [id_usuario, descripcionVenta, monto, metodo]
       );
       idVentaInicial = ventaRes.rows[0].id_venta;
-
       // 4.3 Insertar detalle_venta (todos los items de la recepción)
       for (const it of itemsDetalle) {
         await client.query(
@@ -157,7 +151,6 @@ const crearRecepcion = async (data) => {
           [idVentaInicial, it.id_tamano_recepcion]
         );
       }
-
       // 4.4 Actualizar la recepción con el pago inicial
       await client.query(
         `UPDATE recepcion
@@ -168,7 +161,6 @@ const crearRecepcion = async (data) => {
          WHERE id_recepcion = $4`,
         [monto, metodo, idVentaInicial, idRecepcion]
       );
-
       // 4.5 Afectar caja si es efectivo
       if (metodo === "Efectivo" && idCajaObjetivo) {
         const cajaRes = await client.query(
@@ -181,12 +173,10 @@ const crearRecepcion = async (data) => {
         const idCaja = cajaRes.rows[0].id_caja;
         const montoAnterior = Number(cajaRes.rows[0].total);
         const montoNuevo = Number((montoAnterior + monto).toFixed(2));
-
         await client.query(
           `UPDATE caja SET total = $1 WHERE id_caja = $2`,
           [montoNuevo, idCaja]
         );
-
         await client.query(
           `INSERT INTO transaccion_caja
              (id_caja, id_usuario, monto_nuevo, monto_anterior, monto,
@@ -203,17 +193,17 @@ const crearRecepcion = async (data) => {
           ]
         );
       }
-
       montoPagadoInicial = monto;
       metodoPagoInicial = metodo;
     }
-
+    const datosAlianza = alianza ? { id_alianza: alianza.id_alianza, nombre: alianza.nombre, ubicacion: alianza.ubicacion, foto_data: `data:${alianza.foto_tipo};base64,${alianza.foto.toString('base64')}` } : null;
     await client.query("COMMIT");
-
     return {
       success: true,
       id_recepcion: idRecepcion,
       codigo_recepcion,
+      tipo_operacion, estado_traslado: estadoTraslado,
+      alianza: datosAlianza,
       base_total: baseTotal,
       monto_pagado_inicial: montoPagadoInicial,
       metodo_pago_inicial: metodoPagoInicial,
@@ -231,7 +221,6 @@ const crearRecepcion = async (data) => {
     client.release();
   }
 };
-
 // ============================================
 // VALIDAR CAJA ABIERTA (para pago inicial en efectivo)
 // ============================================
@@ -254,7 +243,6 @@ async function validarCajaAbiertaParaRecepcion(client, idCajaUsuario) {
     }
     return { ok: true, idCaja: c.id_caja };
   }
-
   const res = await client.query(
     `SELECT id_caja FROM caja WHERE estado = 'abierta' ORDER BY id_caja DESC LIMIT 1 FOR UPDATE`
   );
@@ -267,7 +255,6 @@ async function validarCajaAbiertaParaRecepcion(client, idCajaUsuario) {
   }
   return { ok: true, idCaja: res.rows[0].id_caja };
 }
-
 // ============================================
 // UPSERT PERSONA
 // ============================================
@@ -275,9 +262,7 @@ async function upsertPersona(client, persona) {
   const carnet = (persona.carnet ?? "").trim() || null;
   const { nombres, apellidos } = persona;
   const celular = (persona.celular ?? "").trim() || null;
-
   let idPersona = null;
-
   if (carnet) {
     const porCarnet = await client.query(
       `SELECT id_persona FROM persona WHERE carnet = $1`,
@@ -287,7 +272,6 @@ async function upsertPersona(client, persona) {
       idPersona = porCarnet.rows[0].id_persona;
     }
   }
-
   if (!idPersona && celular) {
     const porCelular = await client.query(
       `SELECT id_persona FROM persona WHERE celular = $1`,
@@ -297,7 +281,6 @@ async function upsertPersona(client, persona) {
       idPersona = porCelular.rows[0].id_persona;
     }
   }
-
   if (celular) {
     const celularEnUso = await client.query(
       `SELECT id_persona FROM persona WHERE celular = $1 AND ($2::int IS NULL OR id_persona <> $2)`,
@@ -309,17 +292,15 @@ async function upsertPersona(client, persona) {
       );
     }
   }
-
   if (idPersona) {
     await client.query(
-      `UPDATE persona 
+      `UPDATE persona
        SET nombres = $1, apellidos = $2, celular = $3, carnet = COALESCE($4, carnet)
        WHERE id_persona = $5`,
       [nombres, apellidos, celular, carnet, idPersona]
     );
     return idPersona;
   }
-
   const insert = await client.query(
     `INSERT INTO persona (carnet, nombres, apellidos, celular)
      VALUES ($1, $2, $3, $4) RETURNING id_persona`,
@@ -327,7 +308,6 @@ async function upsertPersona(client, persona) {
   );
   return insert.rows[0].id_persona;
 }
-
 // ============================================
 // BUSCAR PERSONA (por carnet o celular)
 // ============================================
@@ -335,17 +315,14 @@ const buscarPersona = async ({ carnet, celular }) => {
   try {
     const carn = (carnet ?? "").trim();
     const cel = (celular ?? "").trim();
-
     if (!carn && !cel) {
       return {
         success: false,
         message: "Debes enviar carnet o celular para buscar.",
       };
     }
-
     const condiciones = [];
     const params = [];
-
     if (carn) {
       params.push(carn);
       condiciones.push(`carnet = $${params.length}`);
@@ -354,7 +331,6 @@ const buscarPersona = async ({ carnet, celular }) => {
       params.push(cel);
       condiciones.push(`celular = $${params.length}`);
     }
-
     const result = await query(
       `SELECT id_persona, carnet, nombres, apellidos, celular
        FROM persona
@@ -362,11 +338,9 @@ const buscarPersona = async ({ carnet, celular }) => {
        LIMIT 1`,
       params
     );
-
     if (result.rows.length === 0) {
       return { success: false, message: "Persona no encontrada" };
     }
-
     const p = result.rows[0];
     return {
       success: true,
@@ -382,11 +356,9 @@ const buscarPersona = async ({ carnet, celular }) => {
     throw error;
   }
 };
-
 const buscarPersonaPorCarnet = async (carnet) => {
   return buscarPersona({ carnet });
 };
-
 // ============================================
 // LISTAR TAMAÑOS
 // ============================================
@@ -408,7 +380,6 @@ const listarTamanos = async () => {
     throw error;
   }
 };
-
 // ============================================
 // LISTAR ESTANTES
 // ============================================
@@ -429,7 +400,6 @@ const listarEstantes = async () => {
     throw error;
   }
 };
-
 // ============================================
 // CREAR ESTANTE
 // ============================================
@@ -439,7 +409,6 @@ const crearEstante = async (nombre) => {
     if (!limpio) {
       return { success: false, message: "El nombre del estante no puede estar vacío" };
     }
-
     const existe = await query(
       `SELECT id_estante FROM estante WHERE UPPER(estante) = $1`,
       [limpio]
@@ -447,12 +416,10 @@ const crearEstante = async (nombre) => {
     if (existe.rows.length > 0) {
       return { success: false, message: `El estante ${limpio} ya existe` };
     }
-
     const result = await query(
       `INSERT INTO estante (estante) VALUES ($1) RETURNING id_estante, estante`,
       [limpio]
     );
-
     return {
       success: true,
       estante: {
@@ -466,7 +433,6 @@ const crearEstante = async (nombre) => {
     throw error;
   }
 };
-
 // ============================================
 // EDITAR ESTANTE
 // ============================================
@@ -476,7 +442,6 @@ const editarEstante = async (idEstante, nombreNuevo) => {
     if (!limpio) {
       return { success: false, message: "El nombre del estante no puede estar vacío" };
     }
-
     const actual = await query(
       `SELECT estante FROM estante WHERE id_estante = $1`,
       [idEstante]
@@ -484,7 +449,6 @@ const editarEstante = async (idEstante, nombreNuevo) => {
     if (actual.rows.length === 0) {
       return { success: false, message: "Estante no encontrado" };
     }
-
     const enUso = await query(
       `SELECT id_estante FROM estante WHERE UPPER(estante) = $1 AND id_estante <> $2`,
       [limpio, idEstante]
@@ -492,12 +456,10 @@ const editarEstante = async (idEstante, nombreNuevo) => {
     if (enUso.rows.length > 0) {
       return { success: false, message: `El estante ${limpio} ya existe` };
     }
-
     const result = await query(
       `UPDATE estante SET estante = $1 WHERE id_estante = $2 RETURNING id_estante, estante`,
       [limpio, idEstante]
     );
-
     return {
       success: true,
       estante: {
@@ -511,7 +473,6 @@ const editarEstante = async (idEstante, nombreNuevo) => {
     throw error;
   }
 };
-
 // ============================================
 // ELIMINAR ESTANTE
 // ============================================
@@ -527,23 +488,19 @@ const eliminarEstante = async (idEstante) => {
         message: `No se puede eliminar: hay ${enUso.rows[0].total} paquete(s) usando este estante`,
       };
     }
-
     const result = await query(
       `DELETE FROM estante WHERE id_estante = $1 RETURNING estante`,
       [idEstante]
     );
-
     if (result.rows.length === 0) {
       return { success: false, message: "Estante no encontrado" };
     }
-
     return { success: true, message: `Estante ${result.rows[0].estante} eliminado` };
   } catch (error) {
     console.error("Error al eliminar estante:", error);
     throw error;
   }
 };
-
 // ============================================
 // SIGUIENTE CÓDIGO DE RECEPCIÓN
 // ============================================
@@ -552,7 +509,6 @@ const siguienteCodigo = async () => {
     for (let intento = 0; intento < 20; intento++) {
       const numero = Math.floor(100000 + Math.random() * 900000);
       const codigo = `PX-${numero}`;
-
       const existe = await query(
         `SELECT 1 FROM recepcion WHERE codigo_recepcion = $1`,
         [codigo]
@@ -561,7 +517,6 @@ const siguienteCodigo = async () => {
         return { success: true, codigo };
       }
     }
-
     return {
       success: false,
       message: "No se pudo generar un código único. Intenta de nuevo.",
@@ -571,7 +526,6 @@ const siguienteCodigo = async () => {
     throw error;
   }
 };
-
 // ============================================
 // LISTAR RECEPCIONES
 // ============================================
@@ -580,17 +534,15 @@ const listarRecepciones = async () => {
     const recepcionesRes = await query(
       `SELECT id_recepcion, codigo_recepcion, fecha_recepcion, zona, estado,
               monto_pagado_inicial, metodo_pago_inicial, id_venta_inicial,
-              fecha_pago_inicial
+              fecha_pago_inicial, tipo_operacion, id_alianza, estado_traslado, alianza_nombre, alianza_ubicacion
        FROM recepcion WHERE estado != 'eliminado'
        ORDER BY fecha_recepcion DESC`
     );
-
     const {
       calcularDiasYSemanas,
       calcularZonaEfectiva,
       calcularTotal,
     } = require("../utils/almacenaje");
-
     const recepciones = [];
     for (const r of recepcionesRes.rows) {
       const personasRes = await query(
@@ -602,7 +554,6 @@ const listarRecepciones = async () => {
       );
       const dejo = personasRes.rows.find((p) => p.tipo === "deja") || null;
       const recoge = personasRes.rows.find((p) => p.tipo === "recoge") || null;
-
       const itemsRes = await query(
         `SELECT tr.id_tamano_recepcion, tr.precio_tamano, tr.descripcion,
                 t.tamano, e.estante
@@ -612,7 +563,6 @@ const listarRecepciones = async () => {
          WHERE tr.id_recepcion = $1`,
         [r.id_recepcion]
       );
-
       const items = itemsRes.rows.map((it) => ({
         id_tamano_recepcion: it.id_tamano_recepcion,
         precio_tamano: it.precio_tamano == null ? null : Number(it.precio_tamano),
@@ -620,15 +570,12 @@ const listarRecepciones = async () => {
         estante: it.estante,
         descripcion: it.descripcion,
       }));
-
       const base = items.reduce((s, it) => s + (it.precio_tamano ?? 0), 0);
       const { dias, semanas } = calcularDiasYSemanas(r.fecha_recepcion);
       const { total, multiplicador } = calcularTotal(base, r.fecha_recepcion);
       const zonaEfectiva = calcularZonaEfectiva(r.zona, dias);
-
       const montoPagadoInicial = Number(r.monto_pagado_inicial ?? 0);
       const saldoPendiente = Number(Math.max(0, total - montoPagadoInicial).toFixed(2));
-
       recepciones.push({
         id_recepcion: r.id_recepcion,
         codigo_recepcion: r.codigo_recepcion,
@@ -646,6 +593,7 @@ const listarRecepciones = async () => {
         fecha_pago_inicial: r.fecha_pago_inicial,
         saldo_pendiente: saldoPendiente,
         estado: r.estado,
+        tipo_operacion: r.tipo_operacion, id_alianza: r.id_alianza, estado_traslado: r.estado_traslado, alianza_nombre: r.alianza_nombre, alianza_ubicacion: r.alianza_ubicacion,
         dejo,
         recoge,
         items,
@@ -657,8 +605,12 @@ const listarRecepciones = async () => {
     throw error;
   }
 };
-
+const listarAlianzas = async () => {
+  const r = await query('SELECT id_alianza, nombre, ubicacion FROM alianza ORDER BY nombre');
+  return { success: true, alianzas: r.rows };
+};
 module.exports = {
+  listarAlianzas,
   crearRecepcion,
   buscarPersona,
   buscarPersonaPorCarnet,

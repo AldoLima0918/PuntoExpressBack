@@ -1,277 +1,69 @@
-// src/controllers/recepcionarController.js
-const recepcionarService = require("../services/recepcionarService");
-
-// ============================================
-// CREAR RECEPCIÓN
-// ============================================
+const recepcionarService = require('../services/recepcionarService');
+const fallo = (res, status, message) => res.status(status).json({ success: false, message });
 const crearRecepcion = async (req, res) => {
   try {
-    const {
-      codigo_recepcion,
-      zona,
-      dejo,
-      recoge,
-      items,
-      // ✅ NUEVOS CAMPOS OPCIONALES
-      pago_inicial,      // { metodo_pago: "Efectivo" | "QR", monto: number } | null
-    } = req.body;
-
-    if (!codigo_recepcion || !zona || !dejo || !recoge || !items) {
-      return res.status(400).json({ success: false, message: "Faltan datos obligatorios" });
-    }
-    if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ success: false, message: "Debes incluir al menos un paquete" });
-    }
-
-    if (!dejo.celular) {
-      return res.status(400).json({
-        success: false,
-        message: "La persona que deja debe tener celular.",
-      });
-    }
-    if (!recoge.celular) {
-      return res.status(400).json({
-        success: false,
-        message: "La persona que recoge debe tener celular.",
-      });
-    }
-
-    if (!dejo.nombres || !dejo.apellidos) {
-      return res.status(400).json({
-        success: false,
-        message: "Completa los datos de quien deja",
-      });
-    }
-    if (!recoge.nombres || !recoge.apellidos) {
-      return res.status(400).json({
-        success: false,
-        message: "Completa los datos de quien recoge",
-      });
-    }
-
-    // ⚠️ NOTA: Ya NO validamos que sean diferentes personas.
-    //    Se permite que deja === recoge.
-
+    const { codigo_recepcion, zona, dejo, recoge, items, pago_inicial, tipo_operacion = 'local', id_alianza = null } = req.body;
+    if (!codigo_recepcion || !zona || !dejo || !recoge || !items) return fallo(res, 400, 'Faltan datos obligatorios');
+    if (!Array.isArray(items) || items.length === 0) return fallo(res, 400, 'Debes incluir al menos un paquete');
+    if (!dejo.celular) return fallo(res, 400, 'La persona que deja debe tener celular.');
+    if (!recoge.celular) return fallo(res, 400, 'La persona que recoge debe tener celular.');
+    if (!dejo.nombres || !dejo.apellidos) return fallo(res, 400, 'Completa los datos de quien deja');
+    if (!recoge.nombres || !recoge.apellidos) return fallo(res, 400, 'Completa los datos de quien recoge');
+    if (!['local', 'entrada', 'salida'].includes(tipo_operacion)) return fallo(res, 400, 'Tipo de operación inválido');
+    if (tipo_operacion !== 'local' && (!Number.isInteger(id_alianza) || id_alianza <= 0 || id_alianza > 2147483647)) return fallo(res, 400, 'Selecciona una alianza válida');
+    if (tipo_operacion === 'local' && id_alianza !== null) return fallo(res, 400, 'Una recepción local no debe tener alianza');
+    if (typeof codigo_recepcion !== 'string') return fallo(res, 400, 'Código inválido');
+    const codigo = codigo_recepcion.trim().toUpperCase();
+    if (tipo_operacion === 'entrada' ? !/^[A-Z0-9][A-Z0-9 _.-]{0,49}$/.test(codigo) : !/^PX-\d{6}$/.test(codigo)) return fallo(res, 400, 'Código de recepción inválido');
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      if (!it.tamano || !it.estante || it.precio == null) {
-        return res.status(400).json({
-          success: false,
-          message: `El paquete ${i + 1} está incompleto`,
-        });
-      }
-      if (it.tamano === "Otro" && (!it.precio || Number(it.precio) <= 0)) {
-        return res.status(400).json({
-          success: false,
-          message: `El paquete ${i + 1} tiene tamaño "Otro": debes indicar un precio mayor a 0`,
-        });
-      }
-      if (!it.descripcion || !String(it.descripcion).trim()) {
-        return res.status(400).json({
-          success: false,
-          message: `El paquete ${i + 1} debe tener una descripción.`,
-        });
-      }
+      if (!it.tamano || (tipo_operacion !== 'salida' && (!it.estante || it.precio == null))) return fallo(res, 400, `El paquete ${i + 1} está incompleto`);
+      if (tipo_operacion !== 'salida' && it.tamano === 'Otro' && (!it.precio || Number(it.precio) <= 0)) return fallo(res, 400, `El paquete ${i + 1} tiene tamaño "Otro": debes indicar un precio mayor a 0`);
+      if (!it.descripcion || !String(it.descripcion).trim()) return fallo(res, 400, `El paquete ${i + 1} debe tener una descripción.`);
     }
-
-    // ✅ Validar pago_inicial si viene
+    if (tipo_operacion === 'salida' && pago_inicial && Number(pago_inicial.monto) > 0) return fallo(res, 400, 'Los envíos a alianzas no admiten pagos iniciales de almacenaje.');
     if (pago_inicial) {
-      if (
-        typeof pago_inicial.monto !== "number" ||
-        !Number.isFinite(pago_inicial.monto) ||
-        pago_inicial.monto < 0
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: "El monto del pago inicial es inválido.",
-        });
-      }
-      if (pago_inicial.monto > 0) {
-        if (
-          pago_inicial.metodo_pago !== "Efectivo" &&
-          pago_inicial.metodo_pago !== "QR"
-        ) {
-          return res.status(400).json({
-            success: false,
-            message: 'Método de pago inicial inválido. Debe ser "Efectivo" o "QR".',
-          });
-        }
-      }
+      if (typeof pago_inicial.monto !== 'number' || !Number.isFinite(pago_inicial.monto) || pago_inicial.monto < 0) return fallo(res, 400, 'El monto del pago inicial es inválido.');
+      if (pago_inicial.monto > 0 && !['Efectivo', 'QR'].includes(pago_inicial.metodo_pago)) return fallo(res, 400, 'Método de pago inicial inválido. Debe ser "Efectivo" o "QR".');
     }
-
     const idUsuario = req.user?.id_usuario;
-    const idCajaUsuario = req.user?.id_caja ?? null;
-
-    if (!idUsuario) {
-      return res.status(401).json({
-        success: false,
-        message: "Usuario no autenticado",
-      });
-    }
-
-    const result = await recepcionarService.crearRecepcion({
-      codigo_recepcion,
-      zona,
-      dejo,
-      recoge,
-      items,
-      pago_inicial: pago_inicial ?? null,
-      id_usuario: idUsuario,
-      id_caja_usuario: idCajaUsuario,
-    });
+    if (!idUsuario) return fallo(res, 401, 'Usuario no autenticado');
+    const result = await recepcionarService.crearRecepcion({ codigo_recepcion: codigo, zona, dejo, recoge, items, pago_inicial: pago_inicial ?? null, id_usuario: idUsuario, id_caja_usuario: req.user?.id_caja ?? null, tipo_operacion, id_alianza });
     res.status(201).json(result);
   } catch (error) {
-    console.error("Error en crearRecepcion controller:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message || "Error interno del servidor",
-    });
+    console.error('Error en crearRecepcion controller:', error);
+    if (error.code === '23505' && error.constraint === 'recepcion_codigo_recepcion_key') return fallo(res, 409, 'Ese código de recepción ya existe');
+    if (error.status === 400) return fallo(res, 400, error.message);
+    fallo(res, 500, error.message || 'Error interno del servidor');
   }
 };
-
-// ============================================
-// BUSCAR PERSONA (por carnet o celular)
-// ============================================
 const buscarPersonaQuery = async (req, res) => {
-  try {
-    const { carnet, celular } = req.query;
-    const result = await recepcionarService.buscarPersona({ carnet, celular });
-    if (!result.success) return res.status(404).json(result);
-    res.json(result);
-  } catch (error) {
-    console.error("Error en buscarPersonaQuery controller:", error);
-    res.status(500).json({ success: false, message: "Error interno del servidor" });
-  }
+  try { const { carnet, celular } = req.query; const result = await recepcionarService.buscarPersona({ carnet, celular }); res.status(result.success ? 200 : 404).json(result); }
+  catch (error) { console.error('Error en buscarPersonaQuery controller:', error); fallo(res, 500, 'Error interno del servidor'); }
 };
-
-// ============================================
-// BUSCAR PERSONA POR CARNET (compatibilidad)
-// ============================================
 const buscarPersona = async (req, res) => {
-  try {
-    const { carnet } = req.params;
-    if (!carnet) {
-      return res.status(400).json({ success: false, message: "Carnet requerido" });
-    }
-    const result = await recepcionarService.buscarPersona({ carnet });
-    if (!result.success) return res.status(404).json(result);
-    res.json(result);
-  } catch (error) {
-    console.error("Error en buscarPersona controller:", error);
-    res.status(500).json({ success: false, message: "Error interno del servidor" });
-  }
+  try { const { carnet } = req.params; if (!carnet) return fallo(res, 400, 'Carnet requerido'); const result = await recepcionarService.buscarPersona({ carnet }); res.status(result.success ? 200 : 404).json(result); }
+  catch (error) { console.error('Error en buscarPersona controller:', error); fallo(res, 500, 'Error interno del servidor'); }
 };
-
-// ============================================
-// LISTAR TAMAÑOS
-// ============================================
-const listarTamanos = async (req, res) => {
-  try {
-    const result = await recepcionarService.listarTamanos();
-    res.json(result);
-  } catch (error) {
-    console.error("Error en listarTamanos controller:", error);
-    res.status(500).json({ success: false, message: "Error interno del servidor" });
-  }
+const listar = (nombre) => async (_req, res) => {
+  try { res.json(await recepcionarService[nombre]()); }
+  catch (error) { console.error(`Error en ${nombre} controller:`, error); fallo(res, 500, 'Error interno del servidor'); }
 };
-
-// ============================================
-// LISTAR ESTANTES
-// ============================================
-const listarEstantes = async (req, res) => {
-  try {
-    const result = await recepcionarService.listarEstantes();
-    res.json(result);
-  } catch (error) {
-    console.error("Error en listarEstantes controller:", error);
-    res.status(500).json({ success: false, message: "Error interno del servidor" });
-  }
-};
-
-// ============================================
-// CREAR ESTANTE
-// ============================================
+const listarTamanos = listar('listarTamanos');
+const listarEstantes = listar('listarEstantes');
+const listarRecepciones = listar('listarRecepciones');
+const listarAlianzas = listar('listarAlianzas');
+const siguienteCodigo = listar('siguienteCodigo');
 const crearEstante = async (req, res) => {
-  try {
-    const { estante } = req.body;
-    if (!estante) {
-      return res.status(400).json({ success: false, message: "Nombre del estante requerido" });
-    }
-    const result = await recepcionarService.crearEstante(estante);
-    res.status(result.success ? 201 : 400).json(result);
-  } catch (error) {
-    console.error("Error en crearEstante controller:", error);
-    res.status(500).json({ success: false, message: "Error interno del servidor" });
-  }
+  try { const { estante } = req.body; if (!estante) return fallo(res, 400, 'Nombre del estante requerido'); const result = await recepcionarService.crearEstante(estante); res.status(result.success ? 201 : 400).json(result); }
+  catch (error) { console.error('Error en crearEstante controller:', error); fallo(res, 500, 'Error interno del servidor'); }
 };
-
-// ============================================
-// EDITAR ESTANTE
-// ============================================
 const editarEstante = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { estante } = req.body;
-    if (!estante) {
-      return res.status(400).json({ success: false, message: "Nombre del estante requerido" });
-    }
-    const result = await recepcionarService.editarEstante(Number(id), estante);
-    res.status(result.success ? 200 : 400).json(result);
-  } catch (error) {
-    console.error("Error en editarEstante controller:", error);
-    res.status(500).json({ success: false, message: "Error interno del servidor" });
-  }
+  try { const { estante } = req.body; if (!estante) return fallo(res, 400, 'Nombre del estante requerido'); const result = await recepcionarService.editarEstante(Number(req.params.id), estante); res.status(result.success ? 200 : 400).json(result); }
+  catch (error) { console.error('Error en editarEstante controller:', error); fallo(res, 500, 'Error interno del servidor'); }
 };
-
-// ============================================
-// ELIMINAR ESTANTE
-// ============================================
 const eliminarEstante = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const result = await recepcionarService.eliminarEstante(Number(id));
-    res.status(result.success ? 200 : 400).json(result);
-  } catch (error) {
-    console.error("Error en eliminarEstante controller:", error);
-    res.status(500).json({ success: false, message: "Error interno del servidor" });
-  }
+  try { const result = await recepcionarService.eliminarEstante(Number(req.params.id)); res.status(result.success ? 200 : 400).json(result); }
+  catch (error) { console.error('Error en eliminarEstante controller:', error); fallo(res, 500, 'Error interno del servidor'); }
 };
-
-// ============================================
-// SIGUIENTE CÓDIGO
-// ============================================
-const siguienteCodigo = async (req, res) => {
-  try {
-    const result = await recepcionarService.siguienteCodigo();
-    res.json(result);
-  } catch (error) {
-    console.error("Error en siguienteCodigo controller:", error);
-    res.status(500).json({ success: false, message: "Error interno del servidor" });
-  }
-};
-
-// ============================================
-// LISTAR RECEPCIONES
-// ============================================
-const listarRecepciones = async (req, res) => {
-  try {
-    const result = await recepcionarService.listarRecepciones();
-    res.json(result);
-  } catch (error) {
-    console.error("Error en listarRecepciones controller:", error);
-    res.status(500).json({ success: false, message: "Error interno del servidor" });
-  }
-};
-
-module.exports = {
-  crearRecepcion,
-  buscarPersonaQuery,
-  buscarPersona,
-  listarTamanos,
-  listarEstantes,
-  listarRecepciones,
-  crearEstante,
-  editarEstante,
-  eliminarEstante,
-  siguienteCodigo,
-};
+module.exports = { crearRecepcion, buscarPersonaQuery, buscarPersona, listarTamanos, listarEstantes, listarRecepciones, crearEstante, editarEstante, eliminarEstante, siguienteCodigo, listarAlianzas };

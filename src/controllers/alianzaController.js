@@ -46,7 +46,7 @@ async function eliminarAlianza(req,res) {
   try {
     if (!(await alianzaService.eliminarAlianza(id))) return fallo(res,404,'Alianza no encontrada');
     res.json({success:true,message:'Alianza eliminada'});
-  } catch(error) { console.error(error); return fallo(res,500,'Error al eliminar alianza'); }
+  } catch(error) { console.error(error); if (error.code === '23503') return fallo(res,409,'No se puede eliminar: la alianza tiene recepciones asociadas'); return fallo(res,500,'Error al eliminar alianza'); }
 }
 async function obtenerFoto(req,res) {
   const id=Number(req.params.id);

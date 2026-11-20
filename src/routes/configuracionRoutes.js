@@ -1,64 +1,32 @@
-// src/routes/configuracionRoutes.js
-const express = require("express");
+const express = require('express');
 const router = express.Router();
-const configuracionController = require("../controllers/configuracionController");
-const { authenticate, authorize } = require("../middleware/loginmiddleware");
-
-// Todas las rutas requieren autenticación
+const configuracionController = require('../controllers/configuracionController');
+const alianzaController = require('../controllers/alianzaController');
+const { authenticate, authorize } = require('../middleware/loginmiddleware');
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5242880, files: 1, fields: 2, fieldSize: 2048 } });
 router.use(authenticate);
-
-// ─── ESTANTES ────────────────────────────────
-router.get("/estantes", configuracionController.listarEstantes);
-router.post(
-  "/estantes",
-  authorize(["administrador"]),
-  configuracionController.crearEstante
-);
-router.put(
-  "/estantes/:id",
-  authorize(["administrador"]),
-  configuracionController.editarEstante
-);
-router.delete(
-  "/estantes/:id",
-  authorize(["administrador"]),
-  configuracionController.eliminarEstante
-);
-
-// ─── TAMAÑOS ─────────────────────────────────
-router.get("/tamanos", configuracionController.listarTamanos);
-router.post(
-  "/tamanos",
-  authorize(["administrador"]),
-  configuracionController.crearTamano
-);
-router.put(
-  "/tamanos/:id",
-  authorize(["administrador"]),
-  configuracionController.editarTamano
-);
-router.delete(
-  "/tamanos/:id",
-  authorize(["administrador"]),
-  configuracionController.eliminarTamano
-);
-
-// ─── CAJAS ───────────────────────────────────
-router.get("/cajas", configuracionController.listarCajas);
-router.post(
-  "/cajas",
-  authorize(["administrador"]),
-  configuracionController.crearCaja
-);
-router.put(
-  "/cajas/:id",
-  authorize(["administrador"]),
-  configuracionController.editarCaja
-);
-router.delete(
-  "/cajas/:id",
-  authorize(["administrador"]),
-  configuracionController.eliminarCaja
-);
-
+router.get('/estantes', configuracionController.listarEstantes);
+router.post('/estantes', authorize(['administrador']), configuracionController.crearEstante);
+router.put('/estantes/:id', authorize(['administrador']), configuracionController.editarEstante);
+router.delete('/estantes/:id', authorize(['administrador']), configuracionController.eliminarEstante);
+router.get('/tamanos', configuracionController.listarTamanos);
+router.post('/tamanos', authorize(['administrador']), configuracionController.crearTamano);
+router.put('/tamanos/:id', authorize(['administrador']), configuracionController.editarTamano);
+router.delete('/tamanos/:id', authorize(['administrador']), configuracionController.eliminarTamano);
+router.get('/cajas', configuracionController.listarCajas);
+router.post('/cajas', authorize(['administrador']), configuracionController.crearCaja);
+router.put('/cajas/:id', authorize(['administrador']), configuracionController.editarCaja);
+router.delete('/cajas/:id', authorize(['administrador']), configuracionController.eliminarCaja);
+router.get('/alianzas', authorize(['administrador']), alianzaController.listarAlianzas);
+router.get('/alianzas/:id/foto', authorize(['administrador']), alianzaController.obtenerFoto);
+const recibirFoto = (req, res, next) => {
+  upload.single('foto')(req, res, (error) => {
+    if (error) return res.status(400).json({ success: false, message: 'No se pudo subir la foto. Máximo 5 MB.' });
+    next();
+  });
+};
+router.post('/alianzas', authorize(['administrador']), recibirFoto, alianzaController.crearAlianza);
+router.put('/alianzas/:id', authorize(['administrador']), recibirFoto, alianzaController.editarAlianza);
+router.delete('/alianzas/:id', authorize(['administrador']), alianzaController.eliminarAlianza);
 module.exports = router;

@@ -1,7 +1,7 @@
 const controlService = require("../services/controlService");
 
 const listar = async (req, res) => {
-  try { res.json(await controlService.listarRecepcionesActivas()); }
+  try { res.json(await controlService.listarRecepcionesActivas(req.query)); }
   catch (error) {
     console.error("Error en listar control controller:", error);
     res.status(500).json({ success: false, message: "Error interno del servidor" });

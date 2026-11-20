@@ -13,80 +13,196 @@ const listarAlianzasControl = async () => {
   return { success: true, alianzas: res.rows };
 };
 
-const listarRecepcionesActivas = async () => {
+const listarRecepcionesActivas = async (filtros = {}) => {
   try {
-    const cabeceras = await query(
-      `SELECT id_recepcion, codigo_recepcion,
-              to_char(fecha_recepcion, 'YYYY-MM-DD"T"HH24:MI:SS') AS fecha_recepcion,
-              zona, estado, monto_pagado_inicial, metodo_pago_inicial,
-              id_venta_inicial, fecha_pago_inicial, tipo_operacion,
-              id_alianza, estado_traslado, alianza_nombre, alianza_ubicacion
-       FROM recepcion
-       WHERE estado = 'pendiente'
-       ORDER BY fecha_recepcion ASC`
-    );
+    const pagina = Math.max(1, Math.min(1000000, Number.parseInt(filtros.pagina, 10) || 1));
+    const limite = 30;
+    const condiciones = ["r.estado = 'pendiente'"];
+    const valores = [];
+    const agregar = (condicion, valor) => {
+      valores.push(valor);
+      condiciones.push(condicion.replaceAll('?', `$${valores.length}`));
+    };
 
-    const recepciones = [];
-    for (const r of cabeceras.rows) {
-      const personasRes = await query(
-        `SELECT pr.tipo, p.carnet, p.nombres, p.apellidos, p.celular
-         FROM persona_recepcion pr
-         INNER JOIN persona p ON pr.id_persona = p.id_persona
-         WHERE pr.id_recepcion = $1`,
-        [r.id_recepcion]
+    const busqueda = String(filtros.q || '').trim();
+    if (busqueda) {
+      agregar(`(
+        r.codigo_recepcion ILIKE ?
+        OR EXISTS (
+          SELECT 1 FROM persona_recepcion pr
+          JOIN persona p ON p.id_persona = pr.id_persona
+          WHERE pr.id_recepcion = r.id_recepcion AND (
+            p.carnet ILIKE $${valores.length + 1}
+            OR (p.nombres || ' ' || p.apellidos) ILIKE $${valores.length + 1}
+          )
+        )
+        OR EXISTS (
+          SELECT 1 FROM tamano_recepcion tr
+          LEFT JOIN estante e ON e.id_estante = tr.id_estante
+          WHERE tr.id_recepcion = r.id_recepcion AND (
+            tr.descripcion ILIKE $${valores.length + 1} OR e.estante ILIKE $${valores.length + 1}
+          )
+        )
+      )`, `%${busqueda}%`);
+    }
+    // La zona visible es la zona efectiva calculada según los días almacenados.
+    // No filtrar por r.zona: representa solamente la zona original.
+    const zonaSolicitada = ['1', '2'].includes(String(filtros.zona))
+      ? Number(filtros.zona)
+      : null;
+    const alianza = String(filtros.alianza || 'todas');
+    if (alianza === 'local') condiciones.push("COALESCE(r.tipo_operacion, 'local') = 'local'");
+    else if (/^[1-9]\d*$/.test(alianza)) agregar('r.id_alianza = ?', Number(alianza));
+
+    const operacion = String(filtros.operacion || 'todas');
+    if (['local', 'entrada', 'salida'].includes(operacion)) {
+      agregar("COALESCE(r.tipo_operacion, 'local') = ?", operacion);
+    }
+    const traslado = String(filtros.traslado || 'todos');
+    if (traslado === 'local') condiciones.push("COALESCE(r.tipo_operacion, 'local') = 'local'");
+    else if (traslado === 'entrada') condiciones.push("r.tipo_operacion = 'entrada'");
+    else if (['pendiente_envio', 'en_transito', 'recibido'].includes(traslado)) {
+      agregar("r.tipo_operacion = 'salida' AND r.estado_traslado = ?", traslado);
+    }
+
+    const where = condiciones.join(' AND ');
+    const totalRes = zonaSolicitada === null
+      ? await query(
+          `SELECT COUNT(*)::int AS total FROM recepcion r WHERE ${where}`,
+          valores
+        )
+      : null;
+
+    // Para el filtro de zona necesitamos evaluar la misma lógica de zona efectiva
+    // utilizada al presentar cada paquete. Se consultan únicamente ID, fecha y zona
+    // de las coincidencias; los detalles siguen cargándose de 30 en 30.
+    let idsZona = null;
+    if (zonaSolicitada !== null) {
+      const candidatos = await query(
+        `SELECT r.id_recepcion,
+                to_char(r.fecha_recepcion, 'YYYY-MM-DD"T"HH24:MI:SS') AS fecha_recepcion,
+                r.zona
+         FROM recepcion r
+         WHERE ${where}
+         ORDER BY r.fecha_recepcion ASC, r.id_recepcion ASC`,
+        valores
       );
-      const dejoRow = personasRes.rows.find((p) => p.tipo === "deja") || null;
-      const recogeRow = personasRes.rows.find((p) => p.tipo === "recoge") || null;
-      const dejo = dejoRow ? {
-        carnet: dejoRow.carnet, nombres: dejoRow.nombres,
-        apellidos: dejoRow.apellidos, celular: dejoRow.celular,
-      } : null;
-      const recoge = recogeRow ? {
-        carnet: recogeRow.carnet, nombres: recogeRow.nombres,
-        apellidos: recogeRow.apellidos, celular: recogeRow.celular,
-      } : null;
+      idsZona = candidatos.rows
+        .filter((r) => {
+          const { dias } = calcularDiasYSemanas(r.fecha_recepcion);
+          const efectiva = calcularZonaEfectiva(r.zona, dias);
+          return efectiva === `Zona ${zonaSolicitada}`;
+        })
+        .map((r) => r.id_recepcion);
+    }
 
-      const itemsRes = await query(
-        `SELECT tr.id_tamano_recepcion, tr.precio_tamano, tr.descripcion,
+    const total = idsZona === null ? totalRes.rows[0].total : idsZona.length;
+    const totalPaginas = Math.max(1, Math.ceil(total / limite));
+    const paginaActual = Math.min(pagina, totalPaginas);
+    const offset = (paginaActual - 1) * limite;
+
+    const cabeceras = idsZona === null
+      ? await query(
+          `SELECT r.id_recepcion, r.codigo_recepcion,
+                  to_char(r.fecha_recepcion, 'YYYY-MM-DD"T"HH24:MI:SS') AS fecha_recepcion,
+                  r.zona, r.estado, r.monto_pagado_inicial, r.metodo_pago_inicial,
+                  r.id_venta_inicial, r.fecha_pago_inicial, r.tipo_operacion,
+                  r.id_alianza, r.estado_traslado, r.alianza_nombre, r.alianza_ubicacion
+           FROM recepcion r WHERE ${where}
+           ORDER BY r.fecha_recepcion ASC, r.id_recepcion ASC
+           LIMIT $${valores.length + 1} OFFSET $${valores.length + 2}`,
+          [...valores, limite, offset]
+        )
+      : await query(
+          `SELECT r.id_recepcion, r.codigo_recepcion,
+                  to_char(r.fecha_recepcion, 'YYYY-MM-DD"T"HH24:MI:SS') AS fecha_recepcion,
+                  r.zona, r.estado, r.monto_pagado_inicial, r.metodo_pago_inicial,
+                  r.id_venta_inicial, r.fecha_pago_inicial, r.tipo_operacion,
+                  r.id_alianza, r.estado_traslado, r.alianza_nombre, r.alianza_ubicacion
+           FROM recepcion r
+           WHERE r.id_recepcion = ANY($1::int[])
+           ORDER BY r.fecha_recepcion ASC, r.id_recepcion ASC`,
+          [idsZona.slice(offset, offset + limite)]
+        );
+
+    const conteosRes = await query(
+      `SELECT
+         COUNT(*) FILTER (WHERE COALESCE(tipo_operacion, 'local') = 'local')::int AS locales,
+         COUNT(*) FILTER (WHERE tipo_operacion = 'entrada')::int AS entradas,
+         COUNT(*) FILTER (WHERE tipo_operacion = 'salida' AND estado_traslado = 'pendiente_envio')::int AS pendientes,
+         COUNT(*) FILTER (WHERE tipo_operacion = 'salida' AND estado_traslado = 'en_transito')::int AS transito,
+         COUNT(*) FILTER (WHERE tipo_operacion = 'salida' AND estado_traslado = 'recibido')::int AS recibidos
+       FROM recepcion WHERE estado = 'pendiente'`
+    );
+    const conteos = conteosRes.rows[0];
+    const ids = cabeceras.rows.map((r) => r.id_recepcion);
+    if (ids.length === 0) {
+      return { success: true, recepciones: [], pagina: paginaActual, limite, total, totalPaginas, conteos };
+    }
+
+    // Consultas por lotes: 30 cabeceras + personas + items, no una consulta por paquete.
+    const [personasRes, itemsRes] = await Promise.all([
+      query(
+        `SELECT pr.id_recepcion, pr.tipo, p.carnet, p.nombres, p.apellidos, p.celular
+         FROM persona_recepcion pr JOIN persona p ON p.id_persona = pr.id_persona
+         WHERE pr.id_recepcion = ANY($1::int[])`, [ids]
+      ),
+      query(
+        `SELECT tr.id_recepcion, tr.id_tamano_recepcion, tr.precio_tamano, tr.descripcion,
                 t.tamano, e.estante, e.id_estante
          FROM tamano_recepcion tr
-         INNER JOIN tamano t ON tr.id_tamano = t.id_tamano
-         LEFT JOIN estante e ON tr.id_estante = e.id_estante
-         WHERE tr.id_recepcion = $1
-         ORDER BY tr.id_tamano_recepcion`,
-        [r.id_recepcion]
-      );
-      const items = itemsRes.rows.map((it) => ({
-        id_tamano_recepcion: it.id_tamano_recepcion,
-        tamano: it.tamano, estante: it.estante, estante_id: it.id_estante,
-        precio_tamano: Number(it.precio_tamano), descripcion: it.descripcion,
-      }));
+         JOIN tamano t ON tr.id_tamano = t.id_tamano
+         LEFT JOIN estante e ON e.id_estante = tr.id_estante
+         WHERE tr.id_recepcion = ANY($1::int[])
+         ORDER BY tr.id_tamano_recepcion`, [ids]
+      ),
+    ]);
+    const personasPorRecepcion = new Map();
+    for (const persona of personasRes.rows) {
+      if (!personasPorRecepcion.has(persona.id_recepcion)) {
+        personasPorRecepcion.set(persona.id_recepcion, {});
+      }
+      const { id_recepcion, tipo, ...datos } = persona;
+      personasPorRecepcion.get(id_recepcion)[tipo] = datos;
+    }
+    const itemsPorRecepcion = new Map();
+    for (const item of itemsRes.rows) {
+      const { id_recepcion, ...datos } = item;
+      if (!itemsPorRecepcion.has(id_recepcion)) itemsPorRecepcion.set(id_recepcion, []);
+      itemsPorRecepcion.get(id_recepcion).push({
+        ...datos, estante_id: datos.id_estante,
+        precio_tamano: Number(datos.precio_tamano),
+      });
+    }
+    const recepciones = cabeceras.rows.map((r) => {
+      const items = itemsPorRecepcion.get(r.id_recepcion) || [];
+      const personas = personasPorRecepcion.get(r.id_recepcion) || {};
       const base = items.reduce((s, it) => s + it.precio_tamano, 0);
       const { dias, semanas } = calcularDiasYSemanas(r.fecha_recepcion);
-      const { total, multiplicador } = calcularTotal(base, r.fecha_recepcion);
+      const { total: totalCalculado, multiplicador } = calcularTotal(base, r.fecha_recepcion);
       const zonaEfectiva = calcularZonaEfectiva(r.zona, dias);
       const montoPagadoInicial = Number(r.monto_pagado_inicial ?? 0);
-      const saldoPendiente = Number(Math.max(0, total - montoPagadoInicial).toFixed(2));
-      recepciones.push({
-        id_recepcion: r.id_recepcion, codigo_recepcion: r.codigo_recepcion,
-        fecha_recepcion: r.fecha_recepcion, zona: r.zona, zonaEfectiva,
-        dias, semanas, multiplicador, base, total,
+      return {
+        ...r, zonaEfectiva, dias, semanas, multiplicador,
+        base, total: totalCalculado,
         monto_pagado_inicial: montoPagadoInicial,
         metodo_pago_inicial: r.metodo_pago_inicial ?? null,
         id_venta_inicial: r.id_venta_inicial ?? null,
         fecha_pago_inicial: r.fecha_pago_inicial ?? null,
-        saldo_pendiente: saldoPendiente, estado: r.estado,
+        saldo_pendiente: Number(Math.max(0, totalCalculado - montoPagadoInicial).toFixed(2)),
         tipo_operacion: r.tipo_operacion ?? 'local',
         id_alianza: r.id_alianza ?? null,
         estado_traslado: r.estado_traslado ?? null,
         alianza_nombre: r.alianza_nombre ?? null,
         alianza_ubicacion: r.alianza_ubicacion ?? null,
-        dejo, recoge, items,
-      });
-    }
-    return { success: true, recepciones };
+        dejo: personas.deja || null,
+        recoge: personas.recoge || null,
+        items,
+      };
+    });
+    return { success: true, recepciones, pagina: paginaActual, limite, total, totalPaginas, conteos };
   } catch (error) {
-    console.error("Error al listar recepciones activas:", error);
+    console.error('Error al listar recepciones activas:', error);
     throw error;
   }
 };

@@ -54,4 +54,25 @@ const editarEstanteItem = async (req, res) => {
   }
 };
 
-module.exports = { listar, listarAlianzas, cambiarEstadoTraslado, listarEstantes, editarEstanteItem };
+const historialRetiros = async (req,res) => {
+  try { res.json(await controlService.listarRetirosVendedor(req.query.pagina, req.query.cobro, req.query.q, req.query.desde, req.query.hasta)); }
+  catch(error) {
+    console.error('Error al consultar retiros de vendedor:',error);
+    res.status(500).json({success:false,message:'Error interno del servidor'});
+  }
+};
+
+const retirarPorVendedor = async (req, res) => {
+  try {
+    if (!req.user?.id_usuario) return res.status(401).json({success:false,message:'Usuario no autenticado'});
+    const result = await controlService.retirarPorVendedor(
+      Number(req.params.id), req.body, req.user.id_usuario, req.user.id_caja ?? null
+    );
+    res.status(result.success ? 200 : 409).json(result);
+  } catch(error) {
+    console.error('Error al retirar por vendedor:',error);
+    res.status(500).json({success:false,message:'Error interno del servidor'});
+  }
+};
+
+module.exports = { historialRetiros, retirarPorVendedor, listar, listarAlianzas, cambiarEstadoTraslado, listarEstantes, editarEstanteItem };

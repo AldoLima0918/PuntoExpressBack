@@ -1,4 +1,4 @@
-const { query } = require("../../db");
+const { query, pool } = require("../../db");
 const {
   calcularDiasYSemanas,
   calcularZonaEfectiva,
@@ -277,7 +277,175 @@ const listarEstantes = async () => {
   }
 };
 
+
+const listarRetirosVendedor = async (paginaSolicitada, filtroCobro = 'todos', busqueda = '', desde = '', hasta = '') => {
+  const pagina = Math.max(1, Math.min(1000000, parseInt(paginaSolicitada, 10) || 1));
+  const limite = 30;
+  const condiciones = [];
+  const valores = [];
+  const tipoCobro = String(filtroCobro || 'todos');
+  if (tipoCobro === 'sin_cobro') condiciones.push('rv.monto_cobrado = 0');
+  if (tipoCobro === 'con_cobro') condiciones.push('rv.monto_cobrado > 0');
+  const texto = String(busqueda || '').trim();
+  if (texto) {
+    valores.push(`%${texto}%`);
+    condiciones.push(`(r.codigo_recepcion ILIKE $${valores.length} OR rv.nombre_vendedor ILIKE $${valores.length} OR rv.motivo ILIKE $${valores.length})`);
+  }
+  const fechaValida = (valor) => /^\d{4}-\d{2}-\d{2}$/.test(valor) && !Number.isNaN(Date.parse(`${valor}T12:00:00`));
+  const fechaDesde = String(desde || '').trim();
+  const fechaHasta = String(hasta || '').trim();
+  if (fechaDesde && !fechaValida(fechaDesde)) return { success: false, message: 'Fecha desde inválida', retiros: [], total: 0, pagina: 1, totalPaginas: 1, limite };
+  if (fechaHasta && !fechaValida(fechaHasta)) return { success: false, message: 'Fecha hasta inválida', retiros: [], total: 0, pagina: 1, totalPaginas: 1, limite };
+  if (fechaDesde && fechaHasta && fechaDesde > fechaHasta) return { success: false, message: 'Rango de fechas inválido', retiros: [], total: 0, pagina: 1, totalPaginas: 1, limite };
+  if (fechaDesde) {
+    valores.push(fechaDesde);
+    condiciones.push(`rv.fecha_retiro >= $${valores.length}::date`);
+  }
+  if (fechaHasta) {
+    valores.push(fechaHasta);
+    condiciones.push(`rv.fecha_retiro < ($${valores.length}::date + INTERVAL '1 day')`);
+  }
+  const where = condiciones.length ? `WHERE ${condiciones.join(' AND ')}` : '';
+  const totalRes = await query(
+    `SELECT COUNT(*)::int AS total FROM retiro_vendedor rv
+     JOIN recepcion r ON r.id_recepcion=rv.id_recepcion ${where}`, valores
+  );
+  const total = totalRes.rows[0].total;
+  const totalPaginas = Math.max(1, Math.ceil(total / limite));
+  const actual = Math.min(pagina, totalPaginas);
+  const resultado = await query(
+    `SELECT rv.id_retiro_vendedor, rv.nombre_vendedor, rv.motivo, rv.modalidad,
+            rv.total_calculado, rv.monto_pagado_previo, rv.monto_cobrado, rv.metodo_pago,
+            to_char(rv.fecha_retiro, 'YYYY-MM-DD"T"HH24:MI:SS') AS fecha_retiro,
+            r.codigo_recepcion, r.alianza_nombre, rv.id_usuario,
+            COALESCE(
+              NULLIF(BTRIM(CONCAT_WS(' ', NULLIF(to_jsonb(u)->>'nombres', ''), NULLIF(to_jsonb(u)->>'apellidos', ''))), ''),
+              NULLIF(BTRIM(CONCAT_WS(' ', NULLIF(to_jsonb(u)->>'nombre', ''), NULLIF(to_jsonb(u)->>'apellido', ''))), ''),
+              NULLIF(to_jsonb(u)->>'nombre_completo', ''),
+              NULLIF(to_jsonb(u)->>'nombre_usuario', ''),
+              NULLIF(to_jsonb(u)->>'usuario', ''),
+              NULLIF(to_jsonb(u)->>'username', ''),
+              NULLIF(to_jsonb(u)->>'email', '')
+            ) AS nombre_usuario
+     FROM retiro_vendedor rv
+     JOIN recepcion r ON r.id_recepcion=rv.id_recepcion
+     LEFT JOIN usuario u ON u.id_usuario=rv.id_usuario
+     ${where}
+     ORDER BY rv.fecha_retiro DESC, rv.id_retiro_vendedor DESC
+     LIMIT $${valores.length + 1} OFFSET $${valores.length + 2}`,
+    [...valores, limite, (actual - 1) * limite]
+  );
+  return { success: true, retiros: resultado.rows, total, pagina: actual, totalPaginas, limite };
+};
+
+// RETIRO POR VENDEDOR. La transacción evita cobrar dos veces y mantiene trazabilidad.
+const retirarPorVendedor = async (idRecepcion, datos, idUsuario, idCajaUsuario) => {
+  if (!Number.isInteger(idRecepcion) || idRecepcion <= 0) {
+    return { success: false, message: "Recepción inválida" };
+  }
+  const { nombre_vendedor, motivo, modalidad, monto, metodo_pago } = datos || {};
+  const nombre = String(nombre_vendedor || "").trim();
+  const observacion = String(motivo || "").trim();
+  if (nombre.length < 3 || nombre.length > 150 || observacion.length < 5 || observacion.length > 500) {
+    return { success: false, message: "Indica el nombre de quien retira y un motivo de al menos 5 caracteres." };
+  }
+  if (!["sin_cobro", "total", "personalizado"].includes(modalidad)) {
+    return { success: false, message: "Selecciona una modalidad de cobro válida" };
+  }
+  if (modalidad !== "sin_cobro" && !["Efectivo", "QR"].includes(metodo_pago)) {
+    return { success: false, message: "Selecciona Efectivo o QR" };
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const r = await client.query(
+      `SELECT id_recepcion, codigo_recepcion, estado, tipo_operacion, estado_traslado,
+              fecha_recepcion, monto_pagado_inicial
+       FROM recepcion WHERE id_recepcion = $1 FOR UPDATE`, [idRecepcion]
+    );
+    if (!r.rows.length || r.rows[0].estado !== "pendiente") {
+      throw new Error("La recepción ya no está disponible para retiro");
+    }
+    const recepcion = r.rows[0];
+    if (recepcion.tipo_operacion === 'salida' && recepcion.estado_traslado !== 'pendiente_envio') {
+      throw new Error("No se puede retirar por vendedor un paquete ya enviado a una alianza");
+    }
+    const itemsRes = await client.query(
+      `SELECT id_tamano_recepcion, precio_tamano FROM tamano_recepcion WHERE id_recepcion=$1`,
+      [idRecepcion]
+    );
+    if (!itemsRes.rows.length) throw new Error("La recepción no tiene productos");
+    const base = itemsRes.rows.reduce((s, i) => s + Number(i.precio_tamano), 0);
+    const { total } = calcularTotal(base, recepcion.fecha_recepcion);
+    const pagado = Number(recepcion.monto_pagado_inicial || 0);
+    const saldo = Number(Math.max(0, total - pagado).toFixed(2));
+    let cobro = 0;
+    if (modalidad === "total") cobro = saldo;
+    if (modalidad === "personalizado") {
+      const cantidad = Number(monto);
+      if (monto === '' || monto === null || monto === undefined || !Number.isFinite(cantidad) || cantidad < 0 || Math.round(cantidad * 100) !== cantidad * 100 || cantidad > saldo) {
+        throw new Error(`Monto personalizado inválido. Debe ser entre 0 y ${saldo.toFixed(2)} Bs`);
+      }
+      cobro = cantidad;
+    }
+    let idVenta = null;
+    if (cobro > 0) {
+      let idCaja = null;
+      if (metodo_pago === 'Efectivo') {
+        const caja = idCajaUsuario
+          ? await client.query('SELECT id_caja, total, estado FROM caja WHERE id_caja=$1 FOR UPDATE', [idCajaUsuario])
+          : await client.query("SELECT id_caja, total, estado FROM caja WHERE estado='abierta' ORDER BY id_caja DESC LIMIT 1 FOR UPDATE");
+        if (!caja.rows.length || caja.rows[0].estado !== 'abierta') throw new Error('Se requiere una caja abierta para cobrar en efectivo');
+        idCaja = caja.rows[0].id_caja;
+        const anterior = Number(caja.rows[0].total);
+        const nuevo = Number((anterior + cobro).toFixed(2));
+        const venta = await client.query(
+          `INSERT INTO venta(id_usuario, descripcion, total, metodo_pago)
+           VALUES ($1,$2,$3,$4) RETURNING id_venta`,
+          [idUsuario, `Retiro por vendedor ${recepcion.codigo_recepcion} - ${nombre}`, cobro, metodo_pago]
+        );
+        idVenta = venta.rows[0].id_venta;
+        for (const item of itemsRes.rows) await client.query(
+          'INSERT INTO detalle_venta(id_venta,id_tamano_recepcion) VALUES ($1,$2)',
+          [idVenta, item.id_tamano_recepcion]
+        );
+        await client.query('UPDATE caja SET total=$1 WHERE id_caja=$2', [nuevo, idCaja]);
+        await client.query(
+          `INSERT INTO transaccion_caja(id_caja,id_usuario,monto_nuevo,monto_anterior,monto,tipo_movimiento,descripcion,id_venta)
+           VALUES ($1,$2,$3,$4,$5,'ingreso',$6,$7)`,
+          [idCaja,idUsuario,nuevo,anterior,cobro,`Retiro vendedor ${recepcion.codigo_recepcion}`,idVenta]
+        );
+      } else {
+        const venta = await client.query(
+          `INSERT INTO venta(id_usuario, descripcion, total, metodo_pago)
+           VALUES ($1,$2,$3,$4) RETURNING id_venta`,
+          [idUsuario, `Retiro por vendedor ${recepcion.codigo_recepcion} - ${nombre}`, cobro, metodo_pago]
+        );
+        idVenta = venta.rows[0].id_venta;
+        for (const item of itemsRes.rows) await client.query(
+          'INSERT INTO detalle_venta(id_venta,id_tamano_recepcion) VALUES ($1,$2)',
+          [idVenta, item.id_tamano_recepcion]
+        );
+      }
+    }
+    await client.query(
+      `INSERT INTO retiro_vendedor(id_recepcion,id_usuario,nombre_vendedor,motivo,modalidad,total_calculado,
+         monto_pagado_previo,monto_cobrado,metodo_pago,id_venta)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [idRecepcion,idUsuario,nombre,observacion,modalidad,total,pagado,cobro,cobro>0?metodo_pago:null,idVenta]
+    );
+    await client.query("UPDATE recepcion SET estado = 'retirado_vendedor' WHERE id_recepcion=$1",[idRecepcion]);
+    await client.query('COMMIT');
+    return { success:true, codigo_recepcion:recepcion.codigo_recepcion, monto_cobrado:cobro,
+      message:`Retiro por vendedor registrado. Cobro: Bs ${cobro.toFixed(2)}` };
+  } catch(error) {
+    await client.query('ROLLBACK');
+    console.error('Error en retiro por vendedor:',error);
+    return {success:false,message:error.message || 'No se pudo registrar el retiro'};
+  } finally { client.release(); }
+};
+
 module.exports = {
-  listarRecepcionesActivas, listarAlianzasControl, cambiarEstadoTraslado,
+  listarRecepcionesActivas, listarAlianzasControl, cambiarEstadoTraslado, retirarPorVendedor, listarRetirosVendedor,
   editarEstanteItem, listarEstantes,
 };

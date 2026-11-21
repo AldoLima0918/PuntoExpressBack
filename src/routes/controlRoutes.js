@@ -4,6 +4,8 @@ const controlController = require("../controllers/controlController");
 const { authenticate } = require("../middleware/loginmiddleware");
 
 router.get("/", authenticate, controlController.listar);
+router.get("/retiros-vendedor", authenticate, controlController.historialRetiros);
+router.post("/retirar-vendedor/:id", authenticate, controlController.retirarPorVendedor);
 router.get("/alianzas", authenticate, controlController.listarAlianzas);
 router.put("/traslado/:id/estado", authenticate, controlController.cambiarEstadoTraslado);
 router.get("/estantes", controlController.listarEstantes);

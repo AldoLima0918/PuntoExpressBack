@@ -12,56 +12,81 @@ const buscarRecepciones = async (q) => {
   try {
     const texto = String(q || "").trim();
     if (!texto) return { success: true, recepciones: [] };
-
     const textoCodigo = texto.replace(/\s+/g, "");
     const esCodigo = /^[A-Za-z]{1,12}-[A-Za-z0-9-]+$/.test(textoCodigo);
     const like = `%${texto}%`;
-
+    const digitos = texto.replace(/\D/g, "");
+    // Buscar primero las coincidencias reales. Al buscar por código,
+    // exigir coincidencia exacta para evitar resultados de otros códigos.
     const directasRes = esCodigo
       ? await query(
-          `SELECT r.id_recepcion
+        `SELECT r.id_recepcion
            FROM recepcion r
            WHERE r.estado = 'pendiente'
              AND UPPER(REPLACE(r.codigo_recepcion, ' ', '')) = UPPER($1)
            ORDER BY r.id_recepcion DESC
            LIMIT 50`,
-          [textoCodigo]
-        )
+        [textoCodigo]
+      )
       : await query(
-          `SELECT DISTINCT r.id_recepcion
+        `SELECT DISTINCT r.id_recepcion
            FROM recepcion r
            LEFT JOIN persona_recepcion pr_deja
-             ON pr_deja.id_recepcion = r.id_recepcion
-             AND pr_deja.tipo = 'deja'
-           LEFT JOIN persona p_deja
-             ON pr_deja.id_persona = p_deja.id_persona
+             ON pr_deja.id_recepcion = r.id_recepcion AND pr_deja.tipo = 'deja'
+           LEFT JOIN persona p_deja ON p_deja.id_persona = pr_deja.id_persona
            LEFT JOIN persona_recepcion pr_recoge
-             ON pr_recoge.id_recepcion = r.id_recepcion
-             AND pr_recoge.tipo = 'recoge'
-           LEFT JOIN persona p_recoge
-             ON pr_recoge.id_persona = p_recoge.id_persona
-           LEFT JOIN tamano_recepcion tr
-             ON tr.id_recepcion = r.id_recepcion
+             ON pr_recoge.id_recepcion = r.id_recepcion AND pr_recoge.tipo = 'recoge'
+           LEFT JOIN persona p_recoge ON p_recoge.id_persona = pr_recoge.id_persona
+           LEFT JOIN tamano_recepcion tr ON tr.id_recepcion = r.id_recepcion
            WHERE r.estado = 'pendiente'
              AND (
                r.codigo_recepcion ILIKE $1
                OR p_deja.carnet ILIKE $1
                OR p_recoge.carnet ILIKE $1
                OR (p_recoge.nombres || ' ' || p_recoge.apellidos) ILIKE $1
+               OR p_recoge.nombres ILIKE $1
+               OR p_recoge.apellidos ILIKE $1
                OR p_recoge.celular ILIKE $1
                OR tr.descripcion ILIKE $1
+               OR ($2 <> '' AND REPLACE(REPLACE(REPLACE(p_recoge.celular, ' ', ''), '-', ''), '+', '') LIKE '%' || $2 || '%')
              )
            ORDER BY r.id_recepcion DESC
            LIMIT 50`,
-          [like]
-        );
+        [like, digitos]
+      );
+
+    if (directasRes.rows.length === 0) {
+      return { success: true, recepciones: [] };
+    }
+
+    const idsDirectos = directasRes.rows.map((row) => row.id_recepcion);
+
+    // Buscar el destinatario (tipo recoge) de las recepciones encontradas.
+    // Luego incluir TODAS sus recepciones pendientes, no solo la del código.
+    // La asociación se hace por ID real de persona, no por similitud de nombre.
+    const vinculadasRes = await query(
+      `WITH destinatarios AS (
+         SELECT DISTINCT pr.id_persona
+         FROM persona_recepcion pr
+         WHERE pr.tipo = 'recoge'
+           AND pr.id_recepcion = ANY($1::int[])
+       )
+       SELECT DISTINCT r.id_recepcion
+       FROM recepcion r
+       LEFT JOIN persona_recepcion pr
+         ON pr.id_recepcion = r.id_recepcion AND pr.tipo = 'recoge'
+       WHERE r.estado = 'pendiente'
+         AND (
+           r.id_recepcion = ANY($1::int[])
+           OR pr.id_persona IN (SELECT id_persona FROM destinatarios)
+         )
+       ORDER BY r.id_recepcion DESC`,
+      [idsDirectos]
+    );
 
     const recepciones = [];
-
-    for (const row of directasRes.rows) {
-      const detalle = await obtenerRecepcionCompleta(
-        row.id_recepcion
-      );
+    for (const row of vinculadasRes.rows) {
+      const detalle = await obtenerRecepcionCompleta(row.id_recepcion);
       if (detalle) recepciones.push(detalle);
     }
 
@@ -71,7 +96,6 @@ const buscarRecepciones = async (q) => {
     throw error;
   }
 };
-
 // ============================================
 // OBTENER UNA RECEPCIÓN COMPLETA
 // ============================================
@@ -110,20 +134,20 @@ const obtenerRecepcionCompleta = async (idRecepcion) => {
 
   const dejo = dejoRow
     ? {
-        carnet: dejoRow.carnet,
-        nombres: dejoRow.nombres,
-        apellidos: dejoRow.apellidos,
-        celular: dejoRow.celular,
-      }
+      carnet: dejoRow.carnet,
+      nombres: dejoRow.nombres,
+      apellidos: dejoRow.apellidos,
+      celular: dejoRow.celular,
+    }
     : null;
 
   const recoge = recogeRow
     ? {
-        carnet: recogeRow.carnet,
-        nombres: recogeRow.nombres,
-        apellidos: recogeRow.apellidos,
-        celular: recogeRow.celular,
-      }
+      carnet: recogeRow.carnet,
+      nombres: recogeRow.nombres,
+      apellidos: recogeRow.apellidos,
+      celular: recogeRow.celular,
+    }
     : null;
 
   const itemsRes = await query(

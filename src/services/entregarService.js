@@ -28,7 +28,8 @@ const buscarRecepciones = async (q) => {
           `SELECT r.id_recepcion
            FROM recepcion r
            WHERE r.estado = 'pendiente'
-             AND UPPER(REPLACE(r.codigo_recepcion, ' ', '')) = UPPER($1)
+             AND COALESCE(r.tipo_operacion, 'local') <> 'salida'
+              AND UPPER(REPLACE(r.codigo_recepcion, ' ', '')) = UPPER($1)
            ORDER BY r.id_recepcion DESC
            LIMIT 50`,
           [textoCodigo]
@@ -44,6 +45,7 @@ const buscarRecepciones = async (q) => {
            LEFT JOIN persona p_recoge ON p_recoge.id_persona = pr_recoge.id_persona
            LEFT JOIN tamano_recepcion tr ON tr.id_recepcion = r.id_recepcion
            WHERE r.estado = 'pendiente'
+             AND COALESCE(r.tipo_operacion, 'local') <> 'salida'
              AND (
                r.codigo_recepcion ILIKE $1
                OR p_deja.carnet ILIKE $1
@@ -90,6 +92,7 @@ const buscarRecepciones = async (q) => {
        LEFT JOIN persona_recepcion pr
          ON pr.id_recepcion = r.id_recepcion AND pr.tipo = 'recoge'
        WHERE r.estado = 'pendiente'
+         AND COALESCE(r.tipo_operacion, 'local') <> 'salida'
          AND (
            r.id_recepcion = ANY($1::int[])
            OR pr.id_persona IN (SELECT id_persona FROM destinatarios)
@@ -120,7 +123,8 @@ const obtenerRecepcionCompleta = async (idRecepcion) => {
             id_venta_inicial,
             fecha_pago_inicial
      FROM recepcion
-     WHERE id_recepcion = $1 AND estado = 'pendiente'`,
+     WHERE id_recepcion = $1 AND estado = 'pendiente'
+       AND COALESCE(tipo_operacion, 'local') <> 'salida'`,
     [idRecepcion]
   );
   if (cabRes.rows.length === 0) return null;
@@ -430,7 +434,7 @@ const entregarMultiple = async (
     await client.query("BEGIN");
     const cabRes = await client.query(
       `SELECT id_recepcion, codigo_recepcion,
-              fecha_recepcion, estado,
+              fecha_recepcion, estado, tipo_operacion,
               monto_pagado_inicial,
               metodo_pago_inicial
        FROM recepcion
@@ -444,9 +448,9 @@ const entregarMultiple = async (
       );
     }
     for (const cab of cabRes.rows) {
-      if (cab.estado !== "pendiente") {
+      if (cab.estado !== "pendiente" || cab.tipo_operacion === "salida") {
         throw new Error(
-          `La recepción ${cab.codigo_recepcion} ya no está pendiente`
+          `La recepción ${cab.codigo_recepcion} no está disponible para entrega local`
         );
       }
     }
@@ -690,7 +694,89 @@ const entregarMultiple = async (
     client.release();
   }
 };
+
+// ============================================
+// ENVÍOS A ALIANZAS: LISTADOS POR ESTADO
+// ============================================
+const listarEnviosAlianza = async (estado, idAlianza) => {
+  if (!['pendiente_envio', 'en_transito'].includes(estado)) {
+    return { success: false, message: 'Estado de envío inválido', envios: [], alianzas: [] };
+  }
+  const alianzaId = idAlianza == null || idAlianza === '' ? null : Number(idAlianza);
+  if (alianzaId !== null && (!Number.isInteger(alianzaId) || alianzaId <= 0)) {
+    return { success: false, message: 'Alianza inválida', envios: [], alianzas: [] };
+  }
+  const [alianzasRes, enviosRes] = await Promise.all([
+    query('SELECT id_alianza, nombre, ubicacion FROM alianza ORDER BY nombre'),
+    query(`SELECT r.id_recepcion, r.codigo_recepcion,
+                  to_char(r.fecha_recepcion, 'YYYY-MM-DD"T"HH24:MI:SS') AS fecha_recepcion,
+                  r.id_alianza, COALESCE(r.alianza_nombre, a.nombre) AS alianza_nombre,
+                  COALESCE(r.alianza_ubicacion, a.ubicacion) AS alianza_ubicacion,
+                  r.estado_traslado,
+                  (SELECT COUNT(*)::int FROM tamano_recepcion tr WHERE tr.id_recepcion = r.id_recepcion) AS cantidad_paquetes,
+                  COALESCE(NULLIF(TRIM(CONCAT_WS(' ', pd.nombres, pd.apellidos)), ''), '—') AS remitente,
+                  COALESCE(NULLIF(TRIM(CONCAT_WS(' ', pr.nombres, pr.apellidos)), ''), '—') AS destinatario,
+                  COALESCE(pr.celular, '') AS celular_destinatario
+           FROM recepcion r
+           JOIN alianza a ON a.id_alianza = r.id_alianza
+           LEFT JOIN persona_recepcion pdr ON pdr.id_recepcion = r.id_recepcion AND pdr.tipo = 'deja'
+           LEFT JOIN persona pd ON pd.id_persona = pdr.id_persona
+           LEFT JOIN persona_recepcion prr ON prr.id_recepcion = r.id_recepcion AND prr.tipo = 'recoge'
+           LEFT JOIN persona pr ON pr.id_persona = prr.id_persona
+           WHERE r.estado = 'pendiente' AND r.tipo_operacion = 'salida'
+             AND r.estado_traslado = $1
+             AND ($2::int IS NULL OR r.id_alianza = $2)
+           ORDER BY r.fecha_recepcion ASC, r.id_recepcion ASC`, [estado, alianzaId])
+  ]);
+  return { success: true, alianzas: alianzasRes.rows, envios: enviosRes.rows };
+};
+
+// ============================================
+// CAMBIAR ESTADO DE VARIOS ENVÍOS, ATÓMICAMENTE
+// ============================================
+const cambiarEnviosMasivo = async (idsRecepciones, estado) => {
+  if (!Array.isArray(idsRecepciones) || idsRecepciones.length === 0 || idsRecepciones.length > 500 ||
+      idsRecepciones.some(id => !Number.isInteger(id) || id <= 0 || id > 2147483647) ||
+      new Set(idsRecepciones).size !== idsRecepciones.length) {
+    return { success: false, message: 'Selecciona entre 1 y 500 envíos válidos, sin duplicados.' };
+  }
+  if (!['en_transito', 'recibido'].includes(estado)) {
+    return { success: false, message: 'Estado de traslado inválido' };
+  }
+  const anterior = estado === 'en_transito' ? 'pendiente_envio' : 'en_transito';
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const res = await client.query(
+      `SELECT id_recepcion, codigo_recepcion, estado, tipo_operacion, estado_traslado
+       FROM recepcion WHERE id_recepcion = ANY($1::int[]) ORDER BY id_recepcion FOR UPDATE`,
+      [idsRecepciones]
+    );
+    if (res.rows.length !== idsRecepciones.length || res.rows.some(r =>
+      r.estado !== 'pendiente' || r.tipo_operacion !== 'salida' || r.estado_traslado !== anterior
+    )) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Uno o más envíos ya cambiaron de estado. Actualiza el listado y vuelve a intentarlo.' };
+    }
+    await client.query(
+      `UPDATE recepcion SET estado_traslado = $1 WHERE id_recepcion = ANY($2::int[])`,
+      [estado, idsRecepciones]
+    );
+    await client.query('COMMIT');
+    return { success: true, cantidad: res.rows.length, codigos: res.rows.map(r => r.codigo_recepcion),
+      message: estado === 'en_transito' ? `${res.rows.length} envío(s) marcado(s) como despachado(s).` : `${res.rows.length} envío(s) confirmado(s) como recibido(s) por la alianza.` };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error al actualizar envíos en lote:', error);
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
 module.exports = {
+  listarEnviosAlianza,
+  cambiarEnviosMasivo,
   buscarRecepciones,
   previewEntrega,
   entregar,

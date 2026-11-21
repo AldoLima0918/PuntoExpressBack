@@ -3,18 +3,10 @@ const express = require("express");
 const router = express.Router();
 const entregarController = require("../controllers/entregarController");
 const { authenticate } = require("../middleware/loginmiddleware");
-
-// Estado de la caja del usuario (para deshabilitar el botón si está cerrada)
 router.get("/estado-caja", authenticate, entregarController.estadoCaja);
-
-// Buscar recepciones pendientes
 router.get("/buscar", authenticate, entregarController.buscar);
-
-// Preview del monto a cobrar
+router.get("/envios", authenticate, entregarController.listarEnvios);
+router.put("/envios/estado", authenticate, entregarController.cambiarEnvios);
 router.get("/preview/:id", authenticate, entregarController.preview);
-
-// Entregar una o varias recepciones
-// body: { id_recepcion?: number, id_recepciones?: number[], metodo_pago: "Efectivo" | "QR" }
 router.post("/", authenticate, entregarController.entregar);
-
 module.exports = router;

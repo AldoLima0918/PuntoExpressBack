@@ -7,6 +7,7 @@ router.get("/", authenticate, controlController.listar);
 router.get("/retiros-vendedor", authenticate, controlController.historialRetiros);
 router.post("/retirar-vendedor/:id", authenticate, controlController.retirarPorVendedor);
 router.get("/alianzas", authenticate, controlController.listarAlianzas);
+router.get("/alianzas/:id/logo", authenticate, controlController.obtenerLogoAlianza);
 router.put("/traslado/:id/estado", authenticate, controlController.cambiarEstadoTraslado);
 router.get("/estantes", controlController.listarEstantes);
 router.put("/item/:id/estante", authenticate, controlController.editarEstanteItem);

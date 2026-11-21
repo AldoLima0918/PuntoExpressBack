@@ -13,6 +13,22 @@ const listarAlianzasControl = async () => {
   return { success: true, alianzas: res.rows };
 };
 
+// Devuelve el logotipo almacenado en alianza.foto para la reimpresión térmica.
+const obtenerLogoAlianza = async (idAlianza) => {
+  const res = await query(
+    "SELECT foto, foto_tipo FROM alianza WHERE id_alianza = $1",
+    [idAlianza]
+  );
+  if (!res.rows.length) {
+    return { success: false, message: "Alianza no encontrada" };
+  }
+  const { foto, foto_tipo } = res.rows[0];
+  return {
+    success: true,
+    foto_data: `data:${foto_tipo};base64,${foto.toString("base64")}`,
+  };
+};
+
 const listarRecepcionesActivas = async (filtros = {}) => {
   try {
     const pagina = Math.max(1, Math.min(1000000, Number.parseInt(filtros.pagina, 10) || 1));
@@ -446,6 +462,6 @@ const retirarPorVendedor = async (idRecepcion, datos, idUsuario, idCajaUsuario) 
 };
 
 module.exports = {
-  listarRecepcionesActivas, listarAlianzasControl, cambiarEstadoTraslado, retirarPorVendedor, listarRetirosVendedor,
+  listarRecepcionesActivas, listarAlianzasControl, obtenerLogoAlianza, cambiarEstadoTraslado, retirarPorVendedor, listarRetirosVendedor,
   editarEstanteItem, listarEstantes,
 };

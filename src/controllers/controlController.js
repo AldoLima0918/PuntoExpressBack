@@ -16,6 +16,20 @@ const listarAlianzas = async (req, res) => {
   }
 };
 
+const obtenerLogoAlianza = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0 || id > 2147483647) {
+      return res.status(400).json({ success: false, message: "Alianza inválida" });
+    }
+    const result = await controlService.obtenerLogoAlianza(id);
+    res.status(result.success ? 200 : 404).json(result);
+  } catch (error) {
+    console.error("Error al obtener logo de alianza para control:", error);
+    res.status(500).json({ success: false, message: "Error interno del servidor" });
+  }
+};
+
 const cambiarEstadoTraslado = async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -75,4 +89,4 @@ const retirarPorVendedor = async (req, res) => {
   }
 };
 
-module.exports = { historialRetiros, retirarPorVendedor, listar, listarAlianzas, cambiarEstadoTraslado, listarEstantes, editarEstanteItem };
+module.exports = { historialRetiros, retirarPorVendedor, listar, listarAlianzas, obtenerLogoAlianza, cambiarEstadoTraslado, listarEstantes, editarEstanteItem };

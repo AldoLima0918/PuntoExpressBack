@@ -77,26 +77,55 @@ const buscarRecepciones = async (q) => {
     }
     const idsDirectos = directasRes.rows.map((row) => row.id_recepcion);
     // Buscar el destinatario (tipo recoge) de las recepciones encontradas.
-    // Luego incluir TODAS sus recepciones pendientes, no solo la del código.
-    // La asociación se hace por ID real de persona, no por similitud de nombre.
+    // Luego incluir TODAS sus recepciones pendientes (local, alianza, Zona 1
+    // o Zona 2, sin importar el tiempo), no solo la del código.
+    // Una misma persona puede haber quedado registrada en más de una fila de
+    // "persona" (sin carnet, celular escrito distinto, número cambiado), así
+    // que se asocia por: mismo id_persona, mismo carnet, mismo celular
+    // (últimos 8 dígitos) o mismo nombre completo normalizado cuando los
+    // carnets no se contradicen.
     const vinculadasRes = await query(
-      `WITH destinatarios AS (
-         SELECT DISTINCT pr.id_persona
+      `WITH personas_norm AS (
+         SELECT p.id_persona,
+           NULLIF(UPPER(REPLACE(TRIM(COALESCE(p.carnet, '')), ' ', '')), '') AS carnet_n,
+           NULLIF(RIGHT(regexp_replace(COALESCE(p.celular, ''), '\\D', '', 'g'), 8), '') AS cel_n,
+           translate(
+             UPPER(regexp_replace(TRIM(concat_ws(' ', p.nombres, p.apellidos)), '\\s+', ' ', 'g')),
+             'ÁÉÍÓÚÜÑ', 'AEIOUUN'
+           ) AS nom_n
+         FROM persona p
+       ),
+       destinatarios AS (
+         SELECT DISTINCT pn.*
          FROM persona_recepcion pr
+         INNER JOIN personas_norm pn ON pn.id_persona = pr.id_persona
          WHERE pr.tipo = 'recoge'
            AND pr.id_recepcion = ANY($1::int[])
        )
-       SELECT DISTINCT r.id_recepcion,
-         CASE WHEN r.id_recepcion = ANY($1::int[]) THEN 0 ELSE 1 END AS prioridad
+       SELECT r.id_recepcion,
+         MIN(CASE WHEN r.id_recepcion = ANY($1::int[]) THEN 0 ELSE 1 END) AS prioridad
        FROM recepcion r
        LEFT JOIN persona_recepcion pr
          ON pr.id_recepcion = r.id_recepcion AND pr.tipo = 'recoge'
+       LEFT JOIN personas_norm pn ON pn.id_persona = pr.id_persona
        WHERE r.estado = 'pendiente'
          AND COALESCE(r.tipo_operacion, 'local') <> 'salida'
          AND (
            r.id_recepcion = ANY($1::int[])
-           OR pr.id_persona IN (SELECT id_persona FROM destinatarios)
+           OR EXISTS (
+             SELECT 1
+             FROM destinatarios d
+             WHERE d.id_persona = pn.id_persona
+               OR (d.carnet_n IS NOT NULL AND d.carnet_n = pn.carnet_n)
+               OR (LENGTH(d.cel_n) >= 7 AND d.cel_n = pn.cel_n)
+               OR (
+                 d.nom_n <> ''
+                 AND d.nom_n = pn.nom_n
+                 AND (d.carnet_n IS NULL OR pn.carnet_n IS NULL OR d.carnet_n = pn.carnet_n)
+               )
+           )
          )
+       GROUP BY r.id_recepcion
        ORDER BY prioridad ASC, r.id_recepcion DESC`,
       [idsDirectos]
     );

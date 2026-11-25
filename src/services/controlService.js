@@ -796,9 +796,9 @@ const retirarPorVendedor = async (idRecepcion, datos, idUsuario, idCajaUsuario) 
 
       const cantidad = Number(monto);
 
-      if (monto === '' || monto === null || monto === undefined || !Number.isFinite(cantidad) || cantidad < 0 || Number(cantidad.toFixed(2)) !== cantidad || cantidad > saldo) {
+      if (monto === '' || monto === null || monto === undefined || !Number.isFinite(cantidad) || cantidad < 0 || Number(cantidad.toFixed(2)) !== cantidad || cantidad > 99999999.99) {
 
-        throw new Error(`Monto personalizado inválido. Debe ser entre 0 y ${saldo.toFixed(2)} Bs`);
+        throw new Error("Monto personalizado inválido. Debe estar entre Bs 0 y Bs 99.999.999,99, con hasta dos decimales");
 
       }
 
